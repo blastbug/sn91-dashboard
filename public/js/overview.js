@@ -450,7 +450,7 @@ function renderActivity(events) {
     stake_added: { label: 'STAKE+', color: 'var(--good)' },
     stake_removed: { label: 'STAKE-', color: 'var(--warning)' },
   };
-  const rows = (events ?? []).slice(0, 9);
+  const rows = (events ?? []).slice(0, 3);
 
   document.getElementById('activity').innerHTML = `
     <div class="panel">
@@ -468,39 +468,15 @@ function renderActivity(events) {
                     : `${fmtRao(ev.amount, 3)} τ ${ev.category === 'stake_added' ? 'staked to' : 'unstaked from'} ${shortAddr(
                         ev.delegate
                       )}`;
-                return `<div class="activity-row">
+                return `<div class="activity-row compact" title="block ${fmtNum(ev.block_number)}">
                   <span class="activity-time">${timeAgo(ev.timestamp)}</span>
                   <span class="activity-msg"><span class="badge" style="color:${meta.color}">${meta.label}</span> ${esc(
                   detail
                 )}</span>
-                  <span class="dim tiny num">#${fmtNum(ev.block_number)}</span>
                 </div>`;
               })
               .join('')
           : '<div class="empty">No recent chain events.</div>'
-      }
-    </div>`;
-}
-
-function renderValidatorStatus(live) {
-  const vs = live?.validators ?? [];
-  document.getElementById('validatorStatus').innerHTML = `
-    <div class="panel">
-      <div class="panel-header"><h2>Validator Status</h2><span class="dim small">certifying this round</span></div>
-      ${
-        vs.length
-          ? vs
-              .map(
-                (v) => `<div class="activity-row" style="grid-template-columns:20px 1fr auto">
-                  <span class="status-dot ${v.published ? (v.status === 'scored' ? 'on' : 'off') : 'wait'}"></span>
-                  <span class="activity-msg mono">${esc(shortAddr(v.hotkey, 8, 6))}</span>
-                  <span class="dim tiny">${
-                    v.published ? (v.status === 'scored' ? 'certified' : 'refused') : 'pending'
-                  }</span>
-                </div>`
-              )
-              .join('')
-          : '<div class="empty">No validators observed recently.</div>'
       }
     </div>`;
 }
@@ -710,7 +686,6 @@ async function load() {
     if (!live) return;
     renderVerification(live);
     renderValidatorQueue(live);
-    renderValidatorStatus(live);
     renderSubmissionsTable(live);
   });
 

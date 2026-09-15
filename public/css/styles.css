@@ -960,6 +960,18 @@ h3 {
 .activity-row:last-child {
   border-bottom: 0;
 }
+
+/* One line per event, for the narrow dashboard column. */
+.activity-row.compact {
+  grid-template-columns: 58px 1fr;
+  padding: 7px 0;
+  align-items: center;
+}
+.activity-row.compact .activity-msg {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 .activity-time {
   color: var(--ink-3);
   font-size: 11px;
