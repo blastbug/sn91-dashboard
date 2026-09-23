@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { taostats, creditStatus } from './src/taostats.js';
 import { cascade } from './src/cascade.js';
+import { createLiveBus } from './src/livebus.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
@@ -47,6 +48,7 @@ app.get('/api/config', wrap(async () => ({
   apiKeyConfigured: taostats.hasKey(),
   credits: creditStatus(),
   key: await taostats.keyStatus(),
+  stream: { interval_ms: LIVE_INTERVAL_MS, ...liveBus.stats() },
 })));
 
 // --- chain data (Taostats) ---
@@ -54,8 +56,44 @@ app.get('/api/subnet', wrap(() => taostats.subnet()));
 app.get('/api/metagraph', wrap(() => taostats.metagraph()));
 app.get('/api/events', wrap(() => taostats.events()));
 
+/**
+ * Live stream of everything the free receipt store publishes. The chain-backed
+ * panels are deliberately NOT in here: they cost credits per call, so they stay
+ * on a slow client-side poll while this carries the parts that actually move.
+ */
+const LIVE_INTERVAL_MS = Number(process.env.LIVE_INTERVAL_MS || 10_000);
+
+const liveBus = createLiveBus({
+  intervalMs: LIVE_INTERVAL_MS,
+  // Split by how fast each section actually moves. `chain` changes every block,
+  // `round` a few times an hour, `commits` is a 45KB list that is identical for
+  // an hour at a time — hashing them apart is what keeps a steady-state tick at
+  // a few hundred bytes instead of the whole payload.
+  snapshot: async () => {
+    const [liveRes, latestRes] = await Promise.allSettled([cascade.liveStatus(), cascade.latestRound()]);
+    const latest = latestRes.status === 'fulfilled' ? latestRes.value : null;
+    const live = liveRes.status === 'fulfilled' ? liveRes.value : null;
+    if (!live) return { board: latest };
+
+    const { chain, activation, committed_now, committed_now_count, ...round } = live;
+    return {
+      chain: { chain, activation },
+      commits: { committed_now, committed_now_count },
+      round,
+      board: latest,
+    };
+  },
+});
+
+app.get('/api/stream', (req, res) => {
+  liveBus.handler(req, res).catch((err) => {
+    console.error(`[cascade-dash] /api/stream: ${err.message}`);
+    res.end();
+  });
+});
+
 // --- subnet application data (Cascade round receipts) ---
-app.get('/api/cascade/rounds', wrap(() => cascade.roundIndex()));
+app.get('/api/cascade/rounds', wrap(() => cascade.roundHistory()));
 app.get('/api/cascade/latest', wrap(() => cascade.latestRound()));
 app.get('/api/cascade/live', wrap(() => cascade.liveStatus()));
 app.get('/api/cascade/round/:roundId', wrap((req) => cascade.roundDetail(req.params.roundId)));
@@ -63,11 +101,8 @@ app.get('/api/cascade/round/:roundId', wrap((req) => cascade.roundDetail(req.par
 // Public-benchmark comparison for a round. Defaults to the latest round and the
 // preset that round actually trained, since only some presets are published.
 app.get('/api/cascade/benchmarks', wrap(async (req) => {
-  const latest = await cascade.latestRound();
-  const roundId = req.query.round ?? latest.round?.round_id;
-  const preset = req.query.preset ?? latest.round?.sizes?.[0] ?? 'toto2-4m';
-  if (!roundId) return { available: false, entries: [] };
-  return cascade.benchmarks(roundId, preset);
+  if (req.query.round) return cascade.benchmarks(req.query.round, req.query.preset ?? 'toto2-4m');
+  return cascade.benchmarksLatest(req.query.preset);
 }));
 
 /**
@@ -160,6 +195,9 @@ app.get('/api/rewards', wrap(async () => {
 
 app.listen(PORT, () => {
   console.log(`Cascade (SN${NETUID}) dashboard running at http://localhost:${PORT}`);
+  // The receipt store is free, so priming the live snapshot costs nothing and
+  // takes the cold read off the first visitor's first paint.
+  liveBus.warm().catch(() => {});
   if (!taostats.hasKey()) {
     console.warn(
       '[cascade-dash] TAOSTATS_API_KEY is not set — chain pages will be empty.\n' +

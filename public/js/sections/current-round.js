@@ -13,13 +13,16 @@ import {
   epochProgress,
   barCell,
   showError,
+  paint,
+  projectedBlock,
 } from '../common.js';
 
-function renderPipeline(live, liveBlock) {
-  const p = epochProgress(liveBlock, live.epoch_blocks);
+function renderPipeline(live) {
+  const block = projectedBlock(live.chain);
+  const p = epochProgress(block, live.epoch_blocks);
   const stage = live.stages?.[live.stage_index];
 
-  document.getElementById('pipeline').innerHTML = `
+  paint('pipeline', `
     <div class="panel lead">
       <div class="panel-header">
         <div>
@@ -40,7 +43,7 @@ function renderPipeline(live, liveBlock) {
             ? `<div class="meter"><span class="meter-fill" style="width:${(p.progress * 100).toFixed(1)}%"></span></div>
                <div class="meter-row">
                  <span><strong class="num">${fmtPct(p.progress, 1)}</strong> of the epoch elapsed · block ${fmtNum(
-                liveBlock
+                block
               )}</span>
                  <span>${fmtNum(p.remaining)} blocks left · ~${fmtDuration(
                 p.remaining * (live.block_time_s ?? 12)
@@ -58,7 +61,7 @@ function renderPipeline(live, liveBlock) {
              </div>`
           : ''
       }
-    </div>`;
+    </div>`);
 }
 
 function renderStageDetail(live) {
@@ -66,7 +69,7 @@ function renderStageDetail(live) {
   const heatPct = live.heat_total ? (live.heat_done ?? 0) / live.heat_total : null;
   const ws = live.warm_start ?? {};
 
-  document.getElementById('stageDetail').innerHTML = `
+  paint('stageDetail', `
     <div class="cols-2-wide">
       <div class="panel">
         <div class="panel-header"><h2>${isHeat ? 'Screening progress' : 'Stage progress'}</h2>
@@ -99,7 +102,7 @@ function renderStageDetail(live) {
           <dt>Next scheduled init</dt><dd class="digest">${esc(shortGenRef(ws.next_scheduled_init))}</dd>
         </dl>
       </div>
-    </div>`;
+    </div>`);
 }
 
 function renderValidators(live) {
@@ -107,7 +110,7 @@ function renderValidators(live) {
   const done = vs.filter((v) => v.published).length;
   const inValidation = live.stage === 'validation';
 
-  document.getElementById('validators').innerHTML = `
+  paint('validators', `
     <div class="panel">
       <div class="panel-header">
         <h2>Validator verification</h2>
@@ -160,7 +163,7 @@ function renderValidators(live) {
           </tbody>
         </table>
       </div>
-    </div>`;
+    </div>`);
 }
 
 function renderSubmissions(live) {
@@ -168,7 +171,7 @@ function renderSubmissions(live) {
   const el = document.getElementById('submissions');
 
   if (!heat) {
-    el.innerHTML = `<div class="panel"><div class="empty">No heat standings published.</div></div>`;
+    paint(el, `<div class="panel"><div class="empty">No heat standings published.</div></div>`);
     return;
   }
 
@@ -179,7 +182,7 @@ function renderSubmissions(live) {
   const maxP = Math.max(...entrants.map((e) => e.p_best ?? 0), 1e-9);
   const skipped = heat.skipped;
 
-  el.innerHTML = `
+  paint(el, `
     <div class="panel">
       <div class="panel-header">
         <h2>Submitted generators — screening results</h2>
@@ -291,40 +294,32 @@ function renderSubmissions(live) {
              </div>`
           : ''
       }
-    </div>`;
+    </div>`);
+}
+
+/** Repaint the current-round panels from a live frame. Safe to call on every tick. */
+export function renderCurrentRound(live) {
+  if (!live) return;
+  renderPipeline(live);
+  renderStageDetail(live);
+  renderValidators(live);
+  renderSubmissions(live);
 }
 
 export async function mountCurrentRound() {
   try {
-    const [liveRes, subnetRes] = await Promise.allSettled([
-      fetchJSON('/api/cascade/live'),
-      fetchJSON('/api/subnet'),
-    ]);
+    const liveRes = await fetchJSON('/api/cascade/live').then(
+      (value) => ({ ok: true, value }),
+      (error) => ({ ok: false, error })
+    );
 
-    const stale = [];
-    const missing = [];
-
-    if (liveRes.status !== 'fulfilled') {
-      showError(document.getElementById('pipeline'), liveRes.reason);
+    if (!liveRes.ok) {
+      showError(document.getElementById('pipeline'), liveRes.error);
       return { stale: [], missing: ['live status'] };
     }
-    const live = liveRes.value;
-    if (live.stale) stale.push('live status');
 
-    let liveBlock = null;
-    if (subnetRes.status === 'fulfilled') {
-      liveBlock = subnetRes.value.data?.block_number ?? null;
-      if (subnetRes.value.stale) stale.push('subnet');
-    } else {
-      missing.push('subnet');
-    }
-
-    renderPipeline(live, liveBlock);
-    renderStageDetail(live);
-    renderValidators(live);
-    renderSubmissions(live);
-
-    return { stale, missing };
+    renderCurrentRound(liveRes.value);
+    return { stale: liveRes.value.stale ? ['live status'] : [], missing: [] };
   } catch (err) {
     showError(document.getElementById('pipeline'), err);
     return { stale: [], missing: ['live status'] };

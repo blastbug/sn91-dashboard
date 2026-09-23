@@ -6,6 +6,9 @@ const RECEIPTS_BASE = process.env.CASCADE_RECEIPTS_BASE || 'https://s3.hippius.c
 
 const cached = createCache();
 
+// How long a governance tally stays on screen after it stops being published.
+const VOTE_STICKY_MS = 30 * 60 * 1000;
+
 async function getJSON(url) {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Cascade receipts ${res.status} for ${url.replace(RECEIPTS_BASE, '')}`);
@@ -13,6 +16,62 @@ async function getJSON(url) {
 }
 
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+
+/**
+ * Validators sign off on consensus changes by stake-weighted vote. The tally is
+ * published only while a vote is open and has appeared both flat and nested
+ * under `tally`, so both shapes are accepted and absence is normal — once a
+ * feature locks in, the block it activates at shows up on the receipts instead.
+ */
+let lastVote = null; // { vote, at } — see activationVote()
+
+function activationVote(chainDoc) {
+  const a = chainDoc?.activation;
+  // Two validators take turns publishing status/chain.json and only one of them
+  // includes the tally, so the field blinks in and out about once a minute. A
+  // panel driven straight off it would appear and vanish while a vote is still
+  // very much open, so the last sighting is held until it goes properly stale.
+  if (!a) {
+    if (!lastVote || Date.now() - lastVote.at > VOTE_STICKY_MS) return null;
+    return { ...lastVote.vote, mirrored: true };
+  }
+  const t = a.tally ?? a;
+  if (t.ratio == null && t.signed_stake == null) return null;
+  const ratio = t.ratio ?? (t.total_stake ? t.signed_stake / t.total_stake : null);
+  const vote = {
+    feature: a.feature ?? t.feature ?? null,
+    ratio,
+    threshold: a.threshold ?? t.threshold ?? null,
+    locked: Boolean(a.locked ?? t.locked),
+    activation_block: a.activation_block || t.activation_block || null,
+    n_signed: t.n_signed ?? null,
+    n_eligible: t.n_eligible ?? null,
+    signed_stake: t.signed_stake ?? null,
+    total_stake: t.total_stake ?? null,
+    as_of: chainDoc.as_of ?? null,
+    mirrored: false,
+  };
+  lastVote = { vote, at: Date.now() };
+  return vote;
+}
+
+/**
+ * Rounds no longer start from a cold model: each one resumes from the previous
+ * champion's checkpoint, so `generation` counts how many times the lineage has
+ * been carried forward. The receipts record it as a plain boolean; the live
+ * status doc names the actual checkpoints.
+ */
+function warmStart(ws) {
+  if (!ws) return null;
+  if (typeof ws === 'boolean') return { generation: null, active: ws, init_checkpoint: null, next_checkpoint: null, size: null };
+  return {
+    active: true,
+    generation: ws.generation ?? null,
+    init_checkpoint: ws.init_checkpoint ?? null,
+    next_checkpoint: ws.next_scheduled_init ?? null,
+    size: ws.size ?? null,
+  };
+}
 
 function median(xs) {
   if (!xs.length) return null;
@@ -157,6 +216,105 @@ function groupRounds(rounds) {
     .sort(newestFirst);
 }
 
+/**
+ * Per-hotkey breakdowns are only ever read for the round on screen, but they are
+ * carried on every row of the index — 46% of its bytes. History rows are served
+ * without them and the panels that need them read the round they belong to.
+ */
+const HEAVY_ROW_FIELDS = [
+  'cohort_geomeans',
+  'cohort_lcbs',
+  'cohort_per_domain',
+  'cohort_per_horizon',
+  'per_domain',
+  'per_horizon',
+];
+
+function slimRound(round) {
+  const out = { ...round };
+  for (const f of HEAVY_ROW_FIELDS) delete out[f];
+  return out;
+}
+
+/**
+ * uid ↔ hotkey is never published as a table, so it is reassembled from every
+ * free source that happens to carry both. Live commits win over history because
+ * a uid is recycled when its holder is deregistered, and the newest sighting is
+ * the one that still holds.
+ */
+function hotkeyDirectory(rounds, ...live) {
+  const dir = new Map();
+  for (const list of live) {
+    for (const e of list ?? []) if (e?.hotkey && e.uid != null) dir.set(e.hotkey, e.uid);
+  }
+  const pairs = [
+    ['king_hotkey', 'king_uid'],
+    ['chal_hotkey', 'chal_uid'],
+    ['post_round_king_hotkey', 'post_round_king_uid'],
+  ];
+  for (const r of rounds ?? []) {
+    for (const [hk, uk] of pairs) {
+      if (r[hk] && r[uk] != null && !dir.has(r[hk])) dir.set(r[hk], r[uk]);
+    }
+  }
+  return dir;
+}
+
+/**
+ * The duel is no longer one challenger against the king: a cohort of `k`
+ * finalists is scored against the incumbent in the same round, each with its own
+ * bootstrap LCB on the improvement. `cohort_alpha` is the per-comparison
+ * significance level after correcting for testing k of them at once (0.05/k), so
+ * a bigger cohort is a harder bar for each member. A finalist only takes the
+ * crown if its LCB clears `margin`; the receipt's `chal_uid` is whichever
+ * finalist came out on top.
+ */
+function cohortTable(round, dir, { breakdowns = false, labels = {} } = {}) {
+  const lcbs = round?.cohort_lcbs;
+  if (!lcbs || !Object.keys(lcbs).length) return null;
+  const geomeans = round.cohort_geomeans ?? {};
+  const margin = round.margin ?? null;
+
+  const entries = Object.entries(lcbs)
+    .map(([hotkey, lcb]) => ({
+      hotkey,
+      uid: dir.get(hotkey) ?? null,
+      label: labels?.[hotkey] ?? null,
+      lcb: Number.isFinite(lcb) ? lcb : null,
+      geomean: geomeans[hotkey] ?? null,
+      // Improvement over the king in raw score, before the confidence discount.
+      delta: geomeans[hotkey] != null && round.king_geomean != null
+        ? round.king_geomean - geomeans[hotkey]
+        : null,
+      is_leader: hotkey === round.chal_hotkey,
+      clears_margin: margin != null && Number.isFinite(lcb) ? lcb >= margin : null,
+      ...(breakdowns
+        ? {
+            per_domain: round.cohort_per_domain?.[hotkey] ?? null,
+            per_horizon: round.cohort_per_horizon?.[hotkey] ?? null,
+          }
+        : {}),
+    }))
+    .sort((a, b) => (b.lcb ?? -Infinity) - (a.lcb ?? -Infinity));
+
+  entries.forEach((e, i) => {
+    e.rank = i + 1;
+  });
+
+  return {
+    k: round.cohort_k ?? entries.length,
+    alpha: round.cohort_alpha ?? null,
+    margin,
+    n_clears: entries.filter((e) => e.clears_margin).length,
+    warm_start: Boolean(round.warm_start),
+    dethroned: Boolean(round.dethroned),
+    inconclusive: Boolean(round.inconclusive),
+    king: { uid: round.king_uid ?? null, hotkey: round.king_hotkey ?? null, geomean: round.king_geomean ?? null },
+    leader_uid: round.chal_uid ?? null,
+    entries,
+  };
+}
+
 /** Contiguous reigns, derived by walking rounds oldest→newest. */
 function reignChain(rounds) {
   const chrono = [...rounds].reverse().filter((r) => r.status === 'scored' && r.post_round_king_uid != null);
@@ -186,6 +344,27 @@ function reignChain(rounds) {
     if (r.king_uid === current.uid && r.king_gen_ref) current.gen_ref = r.king_gen_ref;
   }
   return reigns.reverse();
+}
+
+// Live status docs, published by the trainer itself. Short TTLs because the
+// stream fans one poll out to every connected browser — the cost of a tighter
+// window is paid once here, not once per viewer.
+const statusRound = () => cached('status:round', 8_000, () => getJSON(`${RECEIPTS_BASE}/status/round.json`));
+const statusHeat = () => cached('status:heat', 15_000, () => getJSON(`${RECEIPTS_BASE}/status/heat.json`));
+const statusChain = () => cached('status:chain', 8_000, () => getJSON(`${RECEIPTS_BASE}/status/chain.json`));
+
+/**
+ * uid ↔ hotkey for everyone currently on the subnet. The round receipts only
+ * ever name the king and the duel leader, so without the live commit list a
+ * cohort board is a column of hotkeys with no uid beside any of them.
+ */
+async function liveDirectory() {
+  const [chainRes, heatRes] = await Promise.allSettled([statusChain(), statusHeat()]);
+  return {
+    submissions: chainRes.status === 'fulfilled' ? chainRes.value.data?.submissions ?? [] : [],
+    entrants: heatRes.status === 'fulfilled' ? heatRes.value.data?.entrants ?? [] : [],
+    labels: heatRes.status === 'fulfilled' ? heatRes.value.data?.labels ?? {} : {},
+  };
 }
 
 async function roundIndex() {
@@ -218,15 +397,27 @@ async function roundIndex() {
 
 async function latestRound() {
   const idx = await roundIndex();
+  const round = idx.rounds[0] ?? null;
+  const live = await liveDirectory();
+  const dir = hotkeyDirectory(idx.rounds, live.submissions, live.entrants);
   return {
     chain: idx.chain,
-    round: idx.rounds[0] ?? null,
-    previous: idx.rounds.slice(1, 6),
+    // The heavy per-hotkey maps travel once, inside `cohort`, already joined to
+    // uids and ranked — the raw row would otherwise ship them again unsorted.
+    round: round ? slimRound(round) : null,
+    cohort: cohortTable(round, dir, { labels: live.labels }),
+    previous: idx.rounds.slice(1, 6).map(slimRound),
     reign: idx.reigns[0] ?? null,
     totals: idx.totals,
     updated_at: idx.updated_at,
     stale: idx.stale,
   };
+}
+
+/** The index as the history pages consume it: every round, no per-hotkey maps. */
+async function roundHistory() {
+  const idx = await roundIndex();
+  return { ...idx, rounds: idx.rounds.map(slimRound) };
 }
 
 /**
@@ -297,8 +488,13 @@ async function roundDetail(roundId) {
     };
   });
 
+  const live = await liveDirectory();
   return {
-    round,
+    round: slimRound(round),
+    cohort: cohortTable(round, hotkeyDirectory(idx.rounds, live.submissions, live.entrants), {
+      breakdowns: true,
+      labels: live.labels,
+    }),
     detail: r.data,
     epoch_blocks: idx.chain?.epoch_blocks ?? 3600,
     stale: r.stale,
@@ -348,9 +544,9 @@ async function liveStatus() {
   // round's on-chain commits — all of which we were otherwise buying from
   // Taostats one credit at a time.
   const [statusRes, heatRes, chainRes, idx] = await Promise.allSettled([
-    cached('status:round', 20_000, () => getJSON(`${RECEIPTS_BASE}/status/round.json`)),
-    cached('status:heat', 30_000, () => getJSON(`${RECEIPTS_BASE}/status/heat.json`)),
-    cached('status:chain', 20_000, () => getJSON(`${RECEIPTS_BASE}/status/chain.json`)),
+    statusRound(),
+    statusHeat(),
+    statusChain(),
     roundIndex(),
   ]);
 
@@ -387,6 +583,7 @@ async function liveStatus() {
   // One list per submitted generator, screened and rejected together, so the
   // verification state of every submission reads in a single pass.
   const entrants = heatDoc?.entrants ?? [];
+  const labels = heatDoc?.labels ?? {};
   const skipped = heatDoc?.skipped ?? null;
   const skippedEntries = skipped?.entries ?? [];
 
@@ -395,8 +592,12 @@ async function liveStatus() {
       uid: e.uid,
       hotkey: e.hotkey,
       gen_ref: e.gen_ref,
-      state: e.status === 'advanced' ? 'advanced' : 'screened',
+      // Miners name their own generators; the label is the only human-readable
+      // handle on a submission, and it is published free alongside the screen.
+      label: labels[e.hotkey] ?? null,
+      state: e.status === 'advanced' ? 'advanced' : e.status === 'seated' ? 'seated' : 'screened',
       rank: e.rank ?? null,
+      rel_score: e.rel_score ?? null,
       crps: e.crps ?? null,
       mase: e.mase ?? null,
       p_best: e.p_best ?? null,
@@ -406,8 +607,10 @@ async function liveStatus() {
       uid: s.uid ?? null,
       hotkey: s.hotkey,
       gen_ref: null,
+      label: labels[s.hotkey] ?? null,
       state: 'rejected',
       rank: null,
+      rel_score: null,
       crps: null,
       mase: null,
       p_best: null,
@@ -441,6 +644,8 @@ async function liveStatus() {
           as_of: chainDoc.as_of ?? null,
         }
       : null,
+
+    activation: activationVote(chainDoc),
     committed_now: committedNow,
     committed_now_count: committedNow.length,
     submissions,
@@ -449,7 +654,9 @@ async function liveStatus() {
       // number of rows that can actually be listed are reported separately.
       submitted: entrants.length + rejectedTotal,
       screened: entrants.length,
-      advanced: entrants.filter((e) => e.status === 'advanced').length,
+      // A duel-only round seats entrants instead of advancing them out of a
+      // screen; both mean the same thing here — it reached the duel.
+      advanced: entrants.filter((e) => e.status === 'advanced' || e.status === 'seated').length,
       rejected: rejectedTotal,
       rejected_listed: skippedEntries.length,
       rejected_truncated: Boolean(skipped?.entries_truncated),
@@ -465,7 +672,8 @@ async function liveStatus() {
     stages: STAGES,
     heat_done: status?.heat_done ?? null,
     heat_total: status?.heat_total ?? null,
-    warm_start: status?.warm_start ?? null,
+    finalists: status?.finalists ?? null,
+    warm_start: warmStart(status?.warm_start),
     heat: heatDoc
       ? {
           is_current: heatIsCurrent,
@@ -475,6 +683,11 @@ async function liveStatus() {
           screen_size: heatDoc.screen_size,
           screened: heatDoc.screened,
           finalists: heatDoc.finalists,
+          // A duel-only round seats every revealed entrant directly, with no
+          // CRPS screen — which is why rank/CRPS/p(best) are legitimately blank.
+          duel_only: Boolean(heatDoc.duel_only),
+          labels: heatDoc.labels ?? {},
+          warm_start: warmStart(heatDoc.warm_start),
           no_screen: Boolean(heatDoc.no_screen),
           no_screen_reason: heatDoc.no_screen_reason ?? null,
           leader_lcb: heatDoc.leader_lcb ?? null,
@@ -485,7 +698,6 @@ async function liveStatus() {
         }
       : null,
     validators,
-    last_published_round: index?.rounds?.[0] ?? null,
     stale: statusRes.status === 'fulfilled' ? statusRes.value.stale : true,
   };
 }
@@ -556,4 +768,36 @@ async function benchmarks(roundId, preset = 'toto2-4m') {
   };
 }
 
-export const cascade = { roundIndex, latestRound, roundDetail, liveStatus, benchmarks };
+/**
+ * The newest round that actually has published benchmark scores.
+ *
+ * Benchmark runs lag the round they belong to and some rounds are skipped
+ * entirely — 10 of the last 119 have no document at all — so asking only for
+ * the latest round leaves the panel permanently blank for no reason. Walking
+ * back a few rounds finds the most recent real result, and the search itself is
+ * cached so the misses are not re-fetched on every page load.
+ */
+async function benchmarksLatest(preset) {
+  const idx = await roundIndex();
+  const r = await cached(`bench:latest:${preset ?? 'auto'}`, 30 * 60 * 1000, async () => {
+    const candidates = idx.rounds.slice(0, 12);
+    for (let i = 0; i < candidates.length; i += 1) {
+      const round = candidates[i];
+      const size = preset ?? round.sizes?.[0] ?? 'toto2-4m';
+      const b = await benchmarks(round.round_id, size);
+      if (b.available) return { ...b, epoch_start_block: round.epoch_start_block, rounds_back: i };
+    }
+    return { available: false, entries: [], rounds_back: null };
+  });
+  return r.data;
+}
+
+export const cascade = {
+  roundIndex,
+  roundHistory,
+  latestRound,
+  roundDetail,
+  liveStatus,
+  benchmarks,
+  benchmarksLatest,
+};

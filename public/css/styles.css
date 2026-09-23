@@ -375,6 +375,20 @@ h3 {
   border: 1px solid var(--border);
   border-radius: 9px;
   overflow: hidden;
+  max-width: 100%;
+}
+/* The pill strip is the one element that cannot shrink, so below tablet width
+   it is what pushes the whole page into a horizontal scroll. Let it wrap, and
+   drop the two pills that are context rather than status. */
+@media (max-width: 1100px) {
+  .stat-pills {
+    flex-wrap: wrap;
+  }
+}
+@media (max-width: 760px) {
+  .stat-pill.optional {
+    display: none;
+  }
 }
 .stat-pill {
   background: var(--surface);
@@ -732,6 +746,12 @@ h3 {
   color: var(--ink-3);
   margin-left: 2px;
 }
+.stat-value .unit {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink-3);
+  margin-left: 5px;
+}
 .kpi-foot {
   display: flex;
   align-items: center;
@@ -769,6 +789,17 @@ h3 {
   border-radius: var(--radius);
   overflow: hidden;
 }
+/* Four tiles inside a dashboard column wrap to 3 + 1, leaving a dead cell.
+   Pinning them to two rows of two keeps the block rectangular at any width. */
+.stat-grid.quad {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+@media (min-width: 1400px) {
+  .dash-grid .stat-grid.quad {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .stat-tile {
   background: var(--surface);
   padding: 14px 16px;
@@ -1386,4 +1417,247 @@ tr.is-king:hover {
   font-size: 12px;
   color: var(--ink-3);
   margin-bottom: 4px;
+}
+
+/* ==========================================================================
+   Live dashboard — streaming state, cohort duel board, governance tally
+   ========================================================================== */
+
+/* ---------- transport indicator ---------- */
+
+.stat-pill.live-pill {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 86px;
+}
+.stat-pill.live-pill .pill-value {
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+}
+.stat-pill.live-pill.on .pill-value {
+  color: var(--good);
+}
+.stat-pill.live-pill.warn .pill-value {
+  color: var(--warning);
+}
+.stat-pill.live-pill.off .pill-value {
+  color: var(--critical);
+}
+
+.pulse.warn {
+  background: var(--warning);
+  box-shadow: 0 0 0 0 var(--warning-soft);
+}
+.pulse.off {
+  background: var(--critical);
+  box-shadow: none;
+  animation: none;
+}
+
+.status-dot.warn {
+  background: var(--warning);
+}
+.status-word.on {
+  color: var(--good);
+}
+.status-word.warn {
+  color: var(--warning);
+}
+.status-word.off {
+  color: var(--critical);
+}
+
+/* The block height counts forward between publishes; a one-frame lift makes it
+   read as a live counter rather than a number that quietly changed. */
+.pill-value.tick {
+  animation: block-tick 620ms ease-out;
+}
+@keyframes block-tick {
+  0% {
+    color: var(--accent);
+    transform: translateY(-1px);
+  }
+  100% {
+    color: var(--ink);
+    transform: none;
+  }
+}
+
+/* Sections repaint on their own schedule, so each one says when it changed. */
+.just-updated > .panel,
+.just-updated > .kpi-grid,
+.just-updated > .stat-grid,
+.panel.just-updated {
+  animation: section-flash 1100ms ease-out;
+}
+@keyframes section-flash {
+  0% {
+    border-color: var(--accent-line);
+    box-shadow: 0 0 0 1px var(--accent-soft);
+  }
+  100% {
+    border-color: var(--border);
+    box-shadow: none;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .pill-value.tick,
+  .just-updated > .panel,
+  .just-updated > .kpi-grid,
+  .just-updated > .stat-grid,
+  .panel.just-updated,
+  .pulse {
+    animation: none;
+  }
+}
+
+.rail-head {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.rail-head .tiny {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- duel cohort board ---------- */
+
+.cohort-table th:first-child,
+.cohort-table td:first-child {
+  width: 44px;
+}
+.cell-clip {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.gen-label {
+  font-family: var(--mono, 'IBM Plex Mono', monospace);
+  font-size: 11.5px;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-line);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+
+/* LCB is meaningful only against two reference points — zero (no better than
+   the king) and the win margin (the bar the crown actually moves at) — so the
+   track carries both rather than scaling to the data alone. */
+.lcb-cell {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 170px;
+}
+.lcb-head {
+  min-width: 190px;
+}
+.lcb-num {
+  min-width: 66px;
+  font-size: 11.5px;
+  color: var(--ink-2);
+}
+.lcb-num.good {
+  color: var(--good);
+}
+.lcb-num.neg {
+  color: var(--diverge-neg);
+}
+.lcb-track {
+  position: relative;
+  flex: 1;
+  height: 9px;
+  min-width: 92px;
+  /* Lighter than the usual sunk fill: a violet bar on near-black reads as no
+     bar at all, and the positive side of this scale is the interesting side. */
+  background: var(--line);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.lcb-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 3px;
+  transition: left 240ms ease, width 240ms ease;
+}
+.lcb-zero {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--line-2);
+  z-index: 2;
+}
+.lcb-margin {
+  position: absolute;
+  top: -2px;
+  bottom: -2px;
+  width: 2px;
+  background: var(--good);
+  opacity: 0.7;
+  z-index: 3;
+}
+
+tr.role-advanced td {
+  background: var(--good-soft);
+}
+tr.role-challenger td {
+  background: var(--accent-soft);
+}
+
+/* ---------- governance tally ---------- */
+
+.gov-panel .panel-header h2 .mono {
+  color: var(--accent);
+}
+.gov-bar {
+  position: relative;
+  height: 14px;
+  background: var(--surface-sunk);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  overflow: hidden;
+  margin-top: 4px;
+}
+.gov-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: linear-gradient(90deg, var(--accent-2), var(--accent));
+  transition: width 400ms ease;
+}
+.gov-fill.passed {
+  background: linear-gradient(90deg, #12876a, var(--good));
+}
+.gov-threshold {
+  position: absolute;
+  top: -3px;
+  bottom: -3px;
+  width: 2px;
+  background: var(--warning);
+  z-index: 2;
+}
+.gov-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 11.5px;
+}
+
+/* ---------- misc ---------- */
+
+.stat-value.good {
+  color: var(--good);
+}
+.num.good {
+  color: var(--good);
 }

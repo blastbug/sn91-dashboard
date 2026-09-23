@@ -15,7 +15,8 @@ import {
   showError,
   checkCredits,
 } from './common.js';
-import { mountCurrentRound } from './sections/current-round.js';
+import { mountCurrentRound, renderCurrentRound } from './sections/current-round.js';
+import { mountLive } from './live.js';
 
 mountChrome();
 checkCredits();
@@ -205,3 +206,7 @@ async function load() {
 }
 
 load();
+
+// Keeps the topbar, status light, context rail and the current-round panels on
+// the round in flight.
+mountLive({ onData: ({ live }) => renderCurrentRound(live) });

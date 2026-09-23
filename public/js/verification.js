@@ -13,6 +13,7 @@ import {
   showError,
   checkCredits,
 } from './common.js';
+import { mountLive } from './live.js';
 
 mountChrome();
 checkCredits();
@@ -235,3 +236,6 @@ async function load() {
 }
 
 load();
+
+// Keeps the topbar, status light and context rail on the round in flight.
+mountLive();

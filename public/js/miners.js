@@ -14,9 +14,11 @@ import {
   barCell,
   showError,
   checkCredits,
+  paint,
 } from './common.js';
 import { mountRewards } from './sections/rewards.js';
 import { mountChain } from './sections/chain.js';
+import { mountLive } from './live.js';
 
 mountChrome();
 checkCredits();
@@ -24,6 +26,13 @@ checkCredits();
 let rows = [];
 /** Reference data the row renderers need but that isn't per-row. */
 let tableMeta = { refBlock: null, blockTimeS: 12, certified: null, receipts: null };
+
+/**
+ * The slow half of the roster: chain state and the last round's signed scores.
+ * Both are fetched once — neither changes within a round — and held here so a
+ * streamed commit or heat update can rebuild the table without refetching them.
+ */
+const source = { neurons: [], detail: null, round: null, live: null };
 
 /**
  * The chain knows uid → stake/incentive/emission; the round receipt knows
@@ -266,54 +275,25 @@ function render() {
   document.getElementById('lbCount').textContent = `${list.length} of ${rows.length}`;
 }
 
-async function load() {
-  try {
-    const [mgRes, latestRes, liveRes] = await Promise.allSettled([
-      fetchJSON('/api/metagraph'),
-      fetchJSON('/api/cascade/latest'),
-      fetchJSON('/api/cascade/live'),
-    ]);
-    const live = liveRes.status === 'fulfilled' ? liveRes.value : null;
+/** Recompute the roster from `source`. Cheap enough to run on every frame. */
+function rebuild() {
+  const { neurons, detail, round, live } = source;
+  rows = buildRows(neurons, detail, live, round?.post_round_king_uid ?? round?.king_uid ?? null);
 
-    const stale = [];
-    const missing = [];
-    const neurons = mgRes.status === 'fulfilled' ? mgRes.value.data : [];
-    if (mgRes.status === 'fulfilled') {
-      if (mgRes.value.stale) stale.push('metagraph');
-    } else {
-      missing.push('metagraph');
-    }
+  // Prefer the live status doc's height (republished every minute or two) over
+  // the receipt index snapshot, which lags by however long ago it published.
+  tableMeta = {
+    heat: live?.heat ?? null,
+    refBlock: live?.chain?.current_block ?? neurons[0]?.block_number ?? null,
+    blockTimeS: live?.block_time_s ?? 12,
+    certified: round?.n_scored ?? null,
+    receipts: round?.n_receipts ?? null,
+  };
 
-    let detail = null;
-    let round = null;
-    if (latestRes.status === 'fulfilled' && latestRes.value.round) {
-      round = latestRes.value.round;
-      try {
-        const d = await fetchJSON(`/api/cascade/round/${encodeURIComponent(round.round_id)}`);
-        detail = d.detail;
-      } catch {
-        missing.push('round scores');
-      }
-    } else {
-      missing.push('rounds');
-    }
+  const competing = rows.filter((r) => r.heat_rank != null).length;
+  const rewarded = rows.filter((r) => r.weight > 0).length;
 
-    rows = buildRows(neurons, detail, live, round?.post_round_king_uid ?? round?.king_uid ?? null);
-
-    // Prefer the metagraph's own block height (freshest, already fetched) over
-    // the receipt index snapshot, which lags by however long ago it published.
-    tableMeta = {
-      heat: live?.heat ?? null,
-      refBlock: live?.chain?.current_block ?? neurons[0]?.block_number ?? latestRes.value?.chain?.current_block ?? null,
-      blockTimeS: latestRes.value?.chain?.block_time_s ?? 12,
-      certified: round?.n_scored ?? null,
-      receipts: round?.n_receipts ?? null,
-    };
-
-    const competing = rows.filter((r) => r.heat_rank != null).length;
-    const rewarded = rows.filter((r) => r.weight > 0).length;
-
-    document.getElementById('summary').innerHTML = `
+  paint('summary', `
       <div class="stat-grid">
         <div class="stat-tile"><div class="stat-label">Miners listed</div><div class="stat-value">${fmtNum(
           rows.length
@@ -330,7 +310,48 @@ async function load() {
         <div class="stat-tile"><div class="stat-label">Earning weight</div><div class="stat-value">${fmtNum(
           rewarded
         )}</div><div class="stat-sub">king + prior kings</div></div>
-      </div>`;
+      </div>`);
+
+  if (document.getElementById('lbBody')) render();
+}
+
+async function load() {
+  try {
+    const [mgRes, latestRes, liveRes] = await Promise.allSettled([
+      fetchJSON('/api/metagraph'),
+      fetchJSON('/api/cascade/latest'),
+      fetchJSON('/api/cascade/live'),
+    ]);
+    const live = liveRes.status === 'fulfilled' ? liveRes.value : null;
+    source.live = live;
+
+    const stale = [];
+    const missing = [];
+    const neurons = mgRes.status === 'fulfilled' ? mgRes.value.data : [];
+    source.neurons = neurons;
+    if (mgRes.status === 'fulfilled') {
+      if (mgRes.value.stale) stale.push('metagraph');
+    } else {
+      missing.push('metagraph');
+    }
+
+    let detail = null;
+    let round = null;
+    if (latestRes.status === 'fulfilled' && latestRes.value.round) {
+      round = latestRes.value.round;
+      source.round = round;
+      try {
+        const d = await fetchJSON(`/api/cascade/round/${encodeURIComponent(round.round_id)}`);
+        detail = d.detail;
+        source.detail = detail;
+      } catch {
+        missing.push('round scores');
+      }
+    } else {
+      missing.push('rounds');
+    }
+
+    rebuild();
 
     document.getElementById('leaderboard').innerHTML = `
       <div class="panel">
@@ -397,3 +418,14 @@ async function load() {
 }
 
 load();
+
+// Commits, the heat mirror and the stage all move within a round; the roster is
+// rebuilt from them in place rather than on a page reload.
+mountLive({
+  parts: ['chain', 'round', 'commits', 'board'],
+  onData: ({ live, latest }) => {
+    source.live = live;
+    if (latest?.round) source.round = latest.round;
+    rebuild();
+  },
+});

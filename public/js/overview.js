@@ -18,13 +18,20 @@ import {
   ring,
   showError,
   checkCredits,
+  paint,
+  projectedBlock,
+  lcbBar,
 } from './common.js';
+import { mountLive } from './live.js';
 
 mountChrome();
 checkCredits();
 
 const STATE_BADGE = {
   advanced: '<span class="badge good">✓ advanced</span>',
+  // A duel-only round has no screen to advance out of — entrants are seated
+  // straight into the duel in reveal order.
+  seated: '<span class="badge accent">▸ seated</span>',
   screened: '<span class="badge plain">○ screened</span>',
   rejected: '<span class="badge critical">✕ rejected</span>',
 };
@@ -66,7 +73,7 @@ function kpiCard({ label, value, unit, sub, spark, trendHtml }) {
   </div>`;
 }
 
-function renderKpis({ live, latest, rewards, subnet, metagraph, roundsHist }) {
+function renderKpis({ live, latest, rewards, metagraph, rounds: roundsHist }) {
   const rounds = roundsHist?.rounds ?? [];
   const reigns = roundsHist?.reigns ?? [];
   const round = latest?.round ?? null;
@@ -88,7 +95,14 @@ function renderKpis({ live, latest, rewards, subnet, metagraph, roundsHist }) {
   // 4. Total stake across the subnet, summed from the live metagraph snapshot.
   const totalStakeAlpha = (metagraph ?? []).reduce((a, n) => a + Number(n.total_alpha_stake ?? 0), 0) / 1e9;
 
-  // 5. Reign length — how many rounds the current king has held, vs. past reigns.
+  // 5. Finalists — how many generators are actually duelling the king now. In a
+  //    duel-only round every revealed entrant is seated, so this is the field
+  //    size, and `cohort` says how many of the last field cleared the margin.
+  const cohort = latest?.cohort ?? null;
+  const finalists = live?.finalists ?? live?.heat?.finalists ?? null;
+  const finalistSeries = series(rounds, 20, (r) => r.heat?.finalists ?? r.cohort_k);
+
+  // 6. Reign length — how many rounds the current king has held, vs. past reigns.
   const reignSeries = reigns.slice(-12).map((r) => r.rounds);
   const reignTrend = trend(reignSeries);
 
@@ -128,11 +142,13 @@ function renderKpis({ live, latest, rewards, subnet, metagraph, roundsHist }) {
       trendHtml: `<span class="kpi-trend flat">weight ${fmtFixed(top?.weight, 3)}</span>`,
     }),
     kpiCard({
-      label: 'Total Stake',
-      value: fmtNum(totalStakeAlpha, 0),
-      unit: 'α',
-      spark: null,
-      trendHtml: `<span class="kpi-trend flat">${fmtNum(metagraph?.length)} keys</span>`,
+      label: 'Finalists in Duel',
+      value: fmtNum(finalists),
+      sub: 'seated this round',
+      spark: sparkline(finalistSeries, { color: 'var(--series-2)' }),
+      trendHtml: `<span class="kpi-trend flat">${
+        cohort ? `${fmtNum(cohort.n_clears)}/${fmtNum(cohort.k)} cleared last round` : `${fmtNum(totalStakeAlpha, 0)} α staked`
+      }</span>`,
     }),
     kpiCard({
       label: 'Reigning King',
@@ -140,7 +156,7 @@ function renderKpis({ live, latest, rewards, subnet, metagraph, roundsHist }) {
       spark: sparkline(reignSeries, { color: 'var(--series-2)' }),
       trendHtml: `<span class="kpi-trend flat">${fmtNum(reign?.rounds)} round${
         reign?.rounds === 1 ? '' : 's'
-      } held</span>`,
+      } held${live?.warm_start?.generation != null ? ` · gen ${fmtNum(live.warm_start.generation)}` : ''}</span>`,
     }),
     kpiCard({
       label: 'Validator Certification',
@@ -160,7 +176,156 @@ function renderKpis({ live, latest, rewards, subnet, metagraph, roundsHist }) {
     }),
   ];
 
-  document.getElementById('kpis').innerHTML = `<div class="kpi-grid">${cards.join('')}</div>`;
+  paint('kpis', `<div class="kpi-grid">${cards.join('')}</div>`);
+}
+
+/**
+ * The duel, as it is actually run now.
+ *
+ * It is no longer one challenger against the incumbent: a cohort of `k`
+ * finalists is scored against the king in the same round. Each gets its own
+ * bootstrap lower confidence bound on how much it improves on the king, and
+ * `alpha` is the per-comparison significance level after correcting for testing
+ * k of them at once — so the more finalists enter, the harder each one's bar.
+ * A finalist only takes the crown if its LCB clears the win margin outright;
+ * simply scoring better than the king is not enough.
+ */
+function renderCohort(latest, live) {
+  const c = latest?.cohort;
+  const round = latest?.round;
+
+  if (!c) {
+    paint('cohort', `<div class="panel">
+      <div class="panel-header"><h2>Duel Cohort</h2></div>
+      <div class="empty">The last published round was not scored as a cohort duel.</div>
+    </div>`);
+    return;
+  }
+
+  const range = Math.max(
+    Math.abs(c.margin ?? 0),
+    ...c.entries.map((e) => Math.abs(e.lcb ?? 0))
+  ) * 1.15 || 0.01;
+
+  const verdict = c.dethroned
+    ? '<span class="badge good">👑 crown changed</span>'
+    : c.inconclusive
+    ? '<span class="badge warning">◷ inconclusive</span>'
+    : '<span class="badge plain">king held</span>';
+
+  const rows = c.entries
+    .map((e) => {
+      const cls = e.clears_margin ? 'role-advanced' : e.is_leader ? 'role-challenger' : '';
+      return `<tr class="stripe ${cls}">
+        <td><span class="rank-cell">#${e.rank}</span></td>
+        <td><strong>${e.uid != null ? esc(e.uid) : '<span class="dim">?</span>'}</strong></td>
+        <td class="mono cell-clip" title="${esc(e.hotkey)}">${esc(e.label ?? shortAddr(e.hotkey))}</td>
+        <td class="num ${e.delta > 0 ? 'good' : ''}" title="geomean ${fmtFixed(e.geomean, 6)}">${
+          e.delta != null ? `${e.delta >= 0 ? '+' : ''}${e.delta.toFixed(5)}` : '—'
+        }</td>
+        <td>${lcbBar(e.lcb, c.margin, range)}</td>
+        <td>${
+          e.clears_margin
+            ? '<span class="badge good">✓ clears</span>'
+            : e.is_leader
+            ? '<span class="badge accent">best of field</span>'
+            : '<span class="dim tiny">short</span>'
+        }</td>
+      </tr>`;
+    })
+    .join('');
+
+  paint('cohort', `
+    <div class="panel">
+      <div class="panel-header">
+        <h2>Duel Cohort — ${fmtNum(c.k)} vs the king</h2>
+        ${verdict}
+      </div>
+      <p class="panel-note">
+        Every finalist is scored against king <strong>uid ${esc(c.king.uid ?? '—')}</strong> over the same
+        windows. <strong>Δ</strong> is how much better its raw score was; <strong>LCB</strong> is the 95% lower
+        bound on that improvement, and the crown only moves if the LCB clears the win margin (the green mark).
+        Beating the king on raw score is not enough. Testing ${fmtNum(c.k)} challengers at once tightens each
+        one's significance level to α = ${fmtFixed(c.alpha, 4)}.
+      </p>
+      <div class="stat-grid quad" style="margin-bottom:14px">
+        <div class="stat-tile"><div class="stat-label">King geomean</div><div class="stat-value">${fmtFixed(
+          c.king.geomean,
+          5
+        )}</div><div class="stat-sub">uid ${esc(c.king.uid ?? '—')}</div></div>
+        <div class="stat-tile"><div class="stat-label">Win margin</div><div class="stat-value">${fmtFixed(
+          c.margin,
+          4
+        )}</div><div class="stat-sub">LCB must exceed</div></div>
+        <div class="stat-tile"><div class="stat-label">Cleared it</div><div class="stat-value ${
+          c.n_clears ? 'good' : ''
+        }">${fmtNum(c.n_clears)}<span class="unit">of ${fmtNum(c.k)}</span></div><div class="stat-sub">${
+    c.dethroned ? 'crown changed hands' : 'king defended'
+  }</div></div>
+        <div class="stat-tile"><div class="stat-label">Warm start</div><div class="stat-value">${
+          live?.warm_start?.generation != null ? `gen ${fmtNum(live.warm_start.generation)}` : c.warm_start ? 'on' : 'cold'
+        }</div><div class="stat-sub">${esc(live?.heat?.screen_size ?? round?.sizes?.[0] ?? '—')}</div></div>
+      </div>
+      <div class="table-wrap">
+        <table class="data-table cohort-table">
+          <thead><tr>
+            <th>#</th><th>UID</th><th>Generator</th><th>Δ vs king</th>
+            <th class="lcb-head">LCB vs win margin</th><th>Verdict</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <div class="dim tiny" style="margin-top:10px">
+        Round ${esc(round?.round_id ?? '—')} · epoch ${fmtNum(round?.epoch_start_block)} ·
+        ${fmtNum(round?.n_windows)} windows over ${fmtNum(round?.n_clusters)} clusters ·
+        certified by ${fmtNum(round?.n_scored)} of ${fmtNum(round?.n_receipts)} validators
+      </div>
+    </div>`);
+}
+
+/**
+ * Consensus changes are not shipped, they are voted in. Validators sign a
+ * feature and the tally is weighted by stake, so a handful of large holders
+ * decide when the rules of the tournament change — which is worth watching if
+ * you are mining against those rules.
+ */
+function renderGovernance(live) {
+  const a = live?.activation;
+  if (!a || a.ratio == null) {
+    paint('govStrip', '');
+    return;
+  }
+  const pct = a.ratio * 100;
+  const threshold = (a.threshold ?? 0.51) * 100;
+  const passed = a.locked || pct >= threshold;
+
+  paint('govStrip', `
+    <div class="panel gov-panel">
+      <div class="panel-header">
+        <h2>Consensus vote — <span class="mono">${esc(a.feature ?? 'feature')}</span></h2>
+        ${
+          passed
+            ? `<span class="badge good">✓ locked in${a.activation_block ? ` at block ${fmtNum(a.activation_block)}` : ''}</span>`
+            : '<span class="badge warning">◷ voting</span>'
+        }
+      </div>
+      <p class="panel-note">
+        Validators sign consensus changes by stake. This one needs
+        <strong>${threshold.toFixed(0)}%</strong> of staked weight before it activates and changes how rounds are scored.
+      </p>
+      <div class="gov-bar">
+        <span class="gov-fill ${passed ? 'passed' : ''}" style="width:${Math.min(100, pct).toFixed(1)}%"></span>
+        <span class="gov-threshold" style="left:${threshold.toFixed(1)}%" title="threshold ${threshold.toFixed(0)}%"></span>
+      </div>
+      <div class="gov-legend">
+        <span class="num"><strong>${pct.toFixed(1)}%</strong> of stake signed</span>
+        <span class="dim">${fmtNum(a.n_signed)} of ${fmtNum(a.n_eligible)} validators · ${fmtNum(
+    a.signed_stake,
+    0
+  )} / ${fmtNum(a.total_stake, 0)} α</span>
+        <span class="dim">threshold ${threshold.toFixed(0)}%</span>
+      </div>
+    </div>`);
 }
 
 function renderRankings(metagraph, latest) {
@@ -178,7 +343,7 @@ function renderRankings(metagraph, latest) {
 
   const medal = (i) => (i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : null);
 
-  document.getElementById('rankings').innerHTML = `
+  paint('rankings', `
     <div class="panel">
       <div class="panel-header">
         <h2>Miner Rankings</h2>
@@ -212,7 +377,7 @@ function renderRankings(metagraph, latest) {
           </tbody>
         </table>
       </div>
-    </div>`;
+    </div>`);
 }
 
 let chartRange = 20;
@@ -256,7 +421,7 @@ function renderPerformance(roundsHist) {
   const draw = () => {
     const window_ = chartRoundsCache.slice(0, chartRange).reverse();
     const vals = window_.map((r) => r.king_geomean).filter((v) => Number.isFinite(v));
-    document.getElementById('perfChart').innerHTML = lineChart(vals, { color: 'var(--accent)' });
+    paint('perfChart', lineChart(vals, { color: 'var(--accent)' }));
 
     const mean = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
     const best = vals.length ? Math.min(...vals) : null;
@@ -265,18 +430,18 @@ function renderPerformance(roundsHist) {
       ? Math.sqrt(vals.reduce((a, v) => a + (v - mean) ** 2, 0) / vals.length)
       : null;
 
-    document.getElementById('perfQuads').innerHTML = `
+    paint('perfQuads', `
       <div class="chart-quad"><div class="stat-label">Average</div><div class="stat-value">${fmtFixed(mean, 4)}</div></div>
       <div class="chart-quad"><div class="stat-label">Best (lowest)</div><div class="stat-value">${fmtFixed(best, 4)}</div></div>
       <div class="chart-quad"><div class="stat-label">Worst (highest)</div><div class="stat-value">${fmtFixed(worst, 4)}</div></div>
-      <div class="chart-quad"><div class="stat-label">Std Dev</div><div class="stat-value">${fmtFixed(std, 4)}</div></div>`;
+      <div class="chart-quad"><div class="stat-label">Std Dev</div><div class="stat-value">${fmtFixed(std, 4)}</div></div>`);
 
     document.querySelectorAll('.chart-tab').forEach((btn) => {
       btn.classList.toggle('active', Number(btn.dataset.range) === chartRange);
     });
   };
 
-  el.innerHTML = `
+  const repainted = paint(el, `
     <div class="panel">
       <div class="panel-header">
         <h2>King Geomean — Performance</h2>
@@ -290,14 +455,18 @@ function renderPerformance(roundsHist) {
         a falling line means the reigning generator keeps getting harder to beat.</p>
       <div id="perfChart"></div>
       <div class="chart-quads" id="perfQuads"></div>
-    </div>`;
+    </div>`);
 
-  el.querySelectorAll('.chart-tab').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      chartRange = Number(btn.dataset.range);
-      draw();
+  // Only wire the toolbar when paint() actually rebuilt it; on a repaint that
+  // changed nothing the old buttons — and their listeners — are still there.
+  if (repainted) {
+    el.querySelectorAll('.chart-tab').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        chartRange = Number(btn.dataset.range);
+        draw();
+      });
     });
-  });
+  }
   draw();
 }
 
@@ -312,7 +481,7 @@ function renderVerification(live) {
   const current = heat?.is_current;
   const rejectedOnly = (live?.submissions ?? []).length > 0 && scored.length === 0;
 
-  document.getElementById('verifyList').innerHTML = `
+  paint('verifyList', `
     <div class="panel">
       <div class="panel-header">
         <h2>Miners Under Verification</h2>
@@ -321,8 +490,13 @@ function renderVerification(live) {
   }</span>
       </div>
       <p class="panel-note">
-        Ring shows each entrant's bootstrap <strong>p(best)</strong> — the probability it is genuinely the
-        top generator of the field. <a href="/#submissions" onclick="document.getElementById('submissions').scrollIntoView({behavior:'smooth'})">Full list of ${fmtNum(
+        ${
+          heat?.duel_only
+            ? `This is a <strong>duel-only</strong> round: every revealed generator is seated straight into
+               the duel with no CRPS screen, so rank is reveal order and p(best) is not scored yet.`
+            : `Ring shows each entrant's bootstrap <strong>p(best)</strong> — the probability it is genuinely the
+               top generator of the field.`
+        } <a href="/#submissions" onclick="document.getElementById('submissions').scrollIntoView({behavior:'smooth'})">Full list of ${fmtNum(
     live?.submission_counts?.submitted
   )} submissions ↓</a>
       </p>
@@ -332,13 +506,27 @@ function renderVerification(live) {
             ? subs
                 .map(
                   (s) => `<div class="verify-item">
-                    ${ring((s.p_best ?? 0) * 100, { size: 46, stroke: 5, color: s.state === 'advanced' ? 'var(--good)' : 'var(--accent)', label: s.p_best != null ? Math.round(s.p_best * 100) + '%' : '—' })}
+                    ${ring(s.p_best != null ? s.p_best * 100 : 100, {
+                      size: 46,
+                      stroke: 5,
+                      color:
+                        s.p_best != null
+                          ? s.state === 'advanced'
+                            ? 'var(--good)'
+                            : 'var(--accent)'
+                          : 'var(--line-2)',
+                      // Nothing has been scored yet in a duel-only round, so the
+                      // ring carries the seat number rather than a fake 0%.
+                      label: s.p_best != null ? `${Math.round(s.p_best * 100)}%` : s.rank != null ? `#${s.rank}` : '—',
+                    })}
                     <div class="verify-meta">
                       <div class="vm-top">UID ${esc(s.uid ?? '—')} ${STATE_BADGE[s.state] ?? ''}</div>
                       <div class="vm-sub">rank ${s.rank ?? '—'} · CRPS ${
                     s.crps != null ? Number(s.crps).toFixed(6) : '—'
                   }</div>
-                      <div class="vm-detail" title="${esc(s.hotkey ?? '')}">${esc(shortAddr(s.hotkey))}</div>
+                      <div class="vm-detail" title="${esc(s.hotkey ?? '')}">${
+                    s.label ? `<span class="gen-label">${esc(s.label)}</span>` : esc(shortAddr(s.hotkey))
+                  }</div>
                     </div>
                   </div>`
                 )
@@ -352,15 +540,17 @@ function renderVerification(live) {
               }</div></div>`
         }
       </div>
-    </div>`;
+    </div>`);
 }
 
-function renderPipeline(live, liveBlock) {
+function renderPipeline(live) {
   // epochProgress needs the CURRENT chain height, not the epoch's own start
   // block — passing the latter always yields elapsed=0, i.e. a permanent "0%
   // complete" regardless of true progress.
-  const p = epochProgress(liveBlock ?? live?.epoch_start_block, live?.epoch_blocks ?? 3600);
-  document.getElementById('pipelineCard').innerHTML = `
+  const p = epochProgress(projectedBlock(live?.chain) ?? live?.epoch_start_block, live?.epoch_blocks ?? 3600);
+  const ws = live?.warm_start;
+  const windows = live?.chain?.stage_windows;
+  paint('pipelineCard', `
     <div class="panel">
       <div class="panel-header"><h2>Round Pipeline</h2><span class="badge accent">epoch ${fmtNum(
         live?.epoch_start_block
@@ -376,12 +566,25 @@ function renderPipeline(live, liveBlock) {
             )} left</span></div>`
           : ''
       }
-    </div>`;
+      <dl class="kv" style="margin-top:14px">
+        <dt>Field</dt><dd>${fmtNum(live?.finalists)} finalist${live?.finalists === 1 ? '' : 's'}${
+    live?.heat?.duel_only ? ' · no heat screen' : ''
+  }</dd>
+        <dt>Warm start</dt><dd>${
+          ws?.generation != null ? `generation ${fmtNum(ws.generation)}` : ws?.active ? 'on' : 'cold start'
+        }</dd>
+        <dt>Windows</dt><dd>${
+          windows
+            ? `heat ${fmtDuration(windows.heat_seconds)} · duel ${fmtDuration(windows.duel_seconds)}`
+            : '—'
+        }</dd>
+      </dl>
+    </div>`);
 }
 
 function renderValidatorQueue(live) {
   const vs = live?.validators ?? [];
-  document.getElementById('validatorQueue').innerHTML = `
+  paint('validatorQueue', `
     <div class="panel">
       <div class="panel-header">
         <h2>Verification Queue</h2>
@@ -413,7 +616,7 @@ function renderValidatorQueue(live) {
           </tbody>
         </table>
       </div>
-    </div>`;
+    </div>`);
 }
 
 function renderChainHealth(subnet, live) {
@@ -421,7 +624,7 @@ function renderChainHealth(subnet, live) {
   const c = live?.submission_counts;
   const fillPct = c?.submitted ? (c.screened / c.submitted) * 100 : 0;
 
-  document.getElementById('chainHealth').innerHTML = `
+  paint('chainHealth', `
     <div class="panel">
       <div class="panel-header"><h2>Chain Health</h2></div>
       <div style="display:flex;justify-content:space-around;gap:10px;margin-top:4px">
@@ -440,7 +643,7 @@ function renderChainHealth(subnet, live) {
         <dt>Immunity</dt><dd>${fmtNum(subnet?.immunity_period)} blk</dd>
         <dt>Min burn</dt><dd>${fmtRao(subnet?.min_burn, 3)} τ</dd>
       </dl>
-    </div>`;
+    </div>`);
 }
 
 function renderActivity(events) {
@@ -452,7 +655,7 @@ function renderActivity(events) {
   };
   const rows = (events ?? []).slice(0, 3);
 
-  document.getElementById('activity').innerHTML = `
+  paint('activity', `
     <div class="panel">
       <div class="panel-header"><h2>Recent Activity</h2><a class="small" href="/miners">View all →</a></div>
       ${
@@ -478,7 +681,7 @@ function renderActivity(events) {
               .join('')
           : '<div class="empty">No recent chain events.</div>'
       }
-    </div>`;
+    </div>`);
 }
 
 const STATE_ROW_BADGE = STATE_BADGE;
@@ -490,8 +693,8 @@ function renderSubmissionsTable(live) {
   const heat = live?.heat;
 
   if (!subs.length || !c) {
-    el.innerHTML = `<div class="panel"><div class="panel-header"><h2>Submission Verification</h2></div>
-      <div class="empty">No screening results published yet.</div></div>`;
+    paint(el, `<div class="panel"><div class="panel-header"><h2>Submission Verification</h2></div>
+      <div class="empty">No screening results published yet.</div></div>`);
     return;
   }
 
@@ -501,7 +704,7 @@ function renderSubmissionsTable(live) {
     (a, b) => (order[a.state] - order[b.state]) || (a.rank ?? 1e9) - (b.rank ?? 1e9) || a.uid - b.uid
   );
 
-  el.innerHTML = `
+  paint(el, `
     <div class="panel">
       <div class="panel-header">
         <h2>Submission Verification — ${fmtNum(c.submitted)} miners</h2>
@@ -533,7 +736,7 @@ function renderSubmissionsTable(live) {
       </div>
       <div class="table-wrap scroll-cap">
         <table class="data-table">
-          <thead><tr><th>UID</th><th>Hotkey</th><th>Verification</th><th>Rank</th><th>CRPS</th><th>Detail</th></tr></thead>
+          <thead><tr><th>UID</th><th>Generator</th><th>Hotkey</th><th>Verification</th><th>Rank</th><th>CRPS</th><th>Detail</th></tr></thead>
           <tbody>
             ${rows
               .map(
@@ -541,6 +744,9 @@ function renderSubmissionsTable(live) {
                   s.state === 'advanced' ? 'role-advanced' : s.state === 'rejected' ? 'role-alert' : ''
                 }">
                   <td><strong>${esc(s.uid ?? '—')}</strong></td>
+                  <td class="cell-clip">${
+                    s.label ? `<span class="gen-label">${esc(s.label)}</span>` : '<span class="dim tiny">unnamed</span>'
+                  }</td>
                   <td class="mono" title="${esc(s.hotkey ?? '')}">${esc(shortAddr(s.hotkey))}</td>
                   <td>${STATE_ROW_BADGE[s.state] ?? esc(s.state)}</td>
                   <td class="num">${s.rank ?? '<span class="dim">—</span>'}</td>
@@ -562,7 +768,7 @@ function renderSubmissionsTable(live) {
              </div>`
           : ''
       }
-    </div>`;
+    </div>`);
 }
 
 /** Resolves to {ok, value} instead of rejecting, so one dead call can't sink the page. */
@@ -573,12 +779,6 @@ const attempt = (url) =>
   );
 
 /**
- * Sections paint as their own data arrives rather than after all seven calls
- * settle. The Cascade receipt store answers in ~0.3s and costs nothing, while
- * the chain calls are credit-metered and serialized — waiting for the slowest
- * one before drawing anything is what made the page look frozen.
- */
-/**
  * Public-benchmark standing. The round's own scoring only says who beat the
  * incumbent; these third-party suites (GIFT-Eval, BOOM, "time") say whether the
  * model is good in absolute terms, against the official Datadog Toto-2 at the
@@ -587,7 +787,7 @@ const attempt = (url) =>
 function renderBenchmarks(b) {
   const el = document.getElementById('benchmarks');
   if (!b?.available || !b.entries?.length) {
-    el.innerHTML = '';
+    paint(el, '');
     return;
   }
   const ref = b.reference?.geomean ?? null;
@@ -599,11 +799,13 @@ function renderBenchmarks(b) {
   const hi = Math.max(gen ?? 0, best?.geomean ?? 0) * 1.01;
   const pos = (v) => (v == null || hi === lo ? null : ((hi - v) / (hi - lo)) * 100);
 
-  el.innerHTML = `
+  paint(el, `
     <div class="panel">
       <div class="panel-header">
         <h2>Public Benchmarks — chasing the official model</h2>
-        <span class="badge plain">${esc(b.preset)}</span>
+        <span class="badge plain">${esc(b.preset)}${
+    b.rounds_back ? ` · ${b.rounds_back} round${b.rounds_back === 1 ? '' : 's'} back` : ''
+  }</span>
       </div>
       <p class="panel-note">
         Scored on third-party suites (GIFT-Eval, BOOM, time) rather than the round's own held-out
@@ -663,78 +865,101 @@ function renderBenchmarks(b) {
         </table>
       </div>
       <div class="dim tiny" style="margin-top:8px">
-        Reference: ${esc(b.reference?.source ?? '—')}
+        ${
+          b.rounds_back
+            ? `Benchmark runs lag the round they score, so these are the newest published results —
+               epoch ${fmtNum(b.epoch_start_block)}. `
+            : ''
+        }Reference: ${esc(b.reference?.source ?? '—')}
       </div>
-    </div>`;
+    </div>`);
 }
 
-async function load() {
-  const pLive = attempt('/api/cascade/live');
-  const pLatest = attempt('/api/cascade/latest');
-  const pRounds = attempt('/api/cascade/rounds');
-  const pRewards = attempt('/api/rewards');
-  const pSubnet = attempt('/api/subnet');
-  const pMeta = attempt('/api/metagraph');
-  const pEvents = attempt('/api/events');
-  const pBench = attempt('/api/cascade/benchmarks');
+/**
+ * Everything the page has been told so far. The two tiers below write into it
+ * independently and each render reads the whole thing, so a panel that needs
+ * both a streamed round and a metered metagraph draws correctly whichever one
+ * lands first — and redraws when the other arrives.
+ */
+const state = {
+  live: null,
+  latest: null,
+  rounds: null,
+  rewards: null,
+  subnet: null,
+  metagraph: null,
+  events: null,
+  bench: null,
+};
 
+/**
+ * Pushed from the receipt store, which is free and unmetered. These are the
+ * panels that actually move during a round, so they redraw within seconds of
+ * anything changing upstream.
+ */
+function renderLiveTier() {
+  const { live, latest } = state;
+  if (!live) return;
+  renderGovernance(live);
+  renderCohort(latest, live);
+  renderVerification(live);
+  renderValidatorQueue(live);
+  renderPipeline(live);
+  renderSubmissionsTable(live);
+  renderKpis(state);
+}
+
+/**
+ * Backed by Taostats, which bills per call. Nothing here changes on a round
+ * boundary, so it is fetched once on load and then only every few minutes.
+ */
+async function loadMeteredTier() {
+  const [rr, rwr, sr, mr, er, br] = await Promise.all([
+    attempt('/api/cascade/rounds'),
+    attempt('/api/rewards'),
+    attempt('/api/subnet'),
+    attempt('/api/metagraph'),
+    attempt('/api/events'),
+    attempt('/api/cascade/benchmarks'),
+  ]);
   const val = (r) => (r.ok ? r.value : null);
 
-  // --- free receipt-store data: paints first ---
-  pLive.then((r) => {
-    const live = val(r);
-    if (!live) return;
-    renderVerification(live);
-    renderValidatorQueue(live);
-    renderSubmissionsTable(live);
-  });
+  state.rounds = val(rr) ?? state.rounds;
+  state.rewards = val(rwr) ?? state.rewards;
+  state.subnet = val(sr)?.data ?? state.subnet;
+  state.metagraph = val(mr)?.data ?? state.metagraph;
+  state.events = val(er)?.events ?? state.events;
+  state.bench = val(br) ?? state.bench;
 
-  pRounds.then((r) => val(r) && renderPerformance(val(r)));
+  if (state.rounds) renderPerformance(state.rounds);
+  renderRankings(state.metagraph ?? [], state.latest);
+  renderChainHealth(state.subnet, state.live);
+  renderActivity(state.events ?? []);
+  renderBenchmarks(state.bench);
+  renderKpis(state);
 
-  Promise.all([pLive, pSubnet]).then(([lr, sr]) => {
-    const live = val(lr);
-    if (live) renderPipeline(live, live.chain?.current_block ?? val(sr)?.data?.block_number);
-  });
-
-  // --- chain-backed sections: paint whenever the chain answers ---
-  Promise.all([pSubnet, pLive]).then(([sr, lr]) => renderChainHealth(val(sr)?.data ?? null, val(lr)));
-  Promise.all([pMeta, pLatest]).then(([mr, lr]) => renderRankings(val(mr)?.data ?? [], val(lr)));
-  pEvents.then((r) => renderActivity(val(r)?.events ?? []));
-  pBench.then((r) => renderBenchmarks(val(r)));
-
-  // --- KPI row depends on nearly everything, so it lands last ---
-  const [lr, lar, rr, rwr, sr, mr, er] = await Promise.all([
-    pLive,
-    pLatest,
-    pRounds,
-    pRewards,
-    pSubnet,
-    pMeta,
-    pEvents,
-  ]);
-
-  const live = val(lr);
-  const latest = val(lar);
-  if (!live && !latest) {
-    showError(document.getElementById('main'), new Error('no round data available'));
-    return;
-  }
-
-  renderKpis({
-    live,
-    latest,
-    rewards: val(rwr),
-    subnet: val(sr)?.data ?? null,
-    metagraph: val(mr)?.data ?? [],
-    roundsHist: val(rr),
-  });
-
-  const stale = [live?.stale && 'live status', latest?.stale && 'rounds', !rr.ok && 'round history'].filter(Boolean);
   const missing = [!sr.ok && 'subnet', !mr.ok && 'metagraph', !er.ok && 'events'].filter(Boolean);
-
+  const stale = [state.live?.stale && 'live status', state.latest?.stale && 'rounds'].filter(Boolean);
   setStatus({ stale, missing });
-  markUpdated();
 }
 
-load();
-setInterval(load, 60_000);
+mountLive({
+  parts: ['chain', 'round', 'board'],
+  onData: ({ live, latest }) => {
+    state.live = live;
+    state.latest = latest;
+    renderLiveTier();
+    // Chain Health and the rankings read the live round too, so they follow.
+    renderChainHealth(state.subnet, live);
+    renderRankings(state.metagraph ?? [], latest);
+    markUpdated();
+  },
+  onMode: (mode, detail) => {
+    if (mode === 'offline' && !state.live) {
+      showError(document.getElementById('main'), new Error(detail ?? 'no round data available'));
+    }
+  },
+});
+
+loadMeteredTier();
+setInterval(loadMeteredTier, 5 * 60_000);

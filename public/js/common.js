@@ -106,6 +106,25 @@ export function fmtDuration(seconds) {
   return `${m}m`;
 }
 
+/**
+ * Blocks land every ~12s but the status doc is republished every minute or two,
+ * so the reported height is always a little behind. Counting forward from the
+ * document's own timestamp — not from when we received it — keeps the number
+ * honest whether the read was fresh or served from cache.
+ */
+export function projectedBlock(chain) {
+  const base = chain?.current_block;
+  if (base == null) return null;
+  const asOf = chain.as_of ? new Date(chain.as_of).getTime() : null;
+  if (!asOf || Number.isNaN(asOf)) return base;
+  const seconds = (Date.now() - asOf) / 1000;
+  if (seconds < 0) return base;
+  const ahead = Math.floor(seconds / (chain.block_time_s || 12));
+  // If the document has stopped updating, projecting indefinitely would invent
+  // a height nobody can verify. Cap the guess at ten minutes of blocks.
+  return base + Math.min(ahead, Math.ceil(600 / (chain.block_time_s || 12)));
+}
+
 /* ---------- fetch ---------- */
 
 export async function fetchJSON(url) {
@@ -172,6 +191,32 @@ export function divergingBar(value, { mid = 0.5, range = 0.1 } = {}) {
   </div>`;
 }
 
+/**
+ * One finalist's lower confidence bound, drawn against the two numbers that
+ * give it meaning: zero (no better than the king) and the win margin, which is
+ * the bar the crown actually moves at. Scaling to the data alone would hide
+ * that a bar reaching far to the right still fell short.
+ */
+export function lcbBar(lcb, margin, range) {
+  if (lcb == null || !Number.isFinite(lcb)) return '<span class="dim">—</span>';
+  const pos = (v) => Math.max(0, Math.min(100, 50 + (v / range) * 50));
+  const zero = 50;
+  const at = pos(lcb);
+  const marginAt = margin != null ? pos(margin) : null;
+  const clears = margin != null && lcb >= margin;
+  const color = clears ? 'var(--good)' : lcb > 0 ? 'var(--accent)' : 'var(--diverge-neg)';
+  const left = Math.min(zero, at);
+  const width = Math.abs(at - zero);
+  return `<div class="lcb-cell">
+    <span class="num lcb-num ${clears ? 'good' : lcb > 0 ? '' : 'neg'}">${lcb >= 0 ? '+' : ''}${lcb.toFixed(5)}</span>
+    <span class="lcb-track">
+      <span class="lcb-zero" style="left:${zero}%"></span>
+      ${marginAt != null ? `<span class="lcb-margin" style="left:${marginAt}%" title="win margin"></span>` : ''}
+      <span class="lcb-fill" style="left:${left}%;width:${width}%;background:${color}"></span>
+    </span>
+  </div>`;
+}
+
 /** Small multiple histogram — one per entry, so 5 series never overlay into mud. */
 export function histogramFacet(hist, { color = 'var(--series-1)', title = '' } = {}) {
   if (!hist || !hist.counts?.length) return `<div class="facet"><div class="empty">No data</div></div>`;
@@ -228,19 +273,25 @@ export function stepper(live, { compact = false, vertical = false } = {}) {
 }
 
 /** Persistent context strip: what the tournament is doing right now, on sub-pages. */
-export function renderRail(live, liveBlock) {
+export function renderRail(live) {
   const el = document.getElementById('liveRail');
   if (!el || !live) return;
 
-  const p = epochProgress(liveBlock ?? null, live.epoch_blocks);
+  const p = epochProgress(projectedBlock(live.chain), live.epoch_blocks);
   const stageLabel = live.stages?.[live.stage_index]?.label ?? 'Idle';
+  const finalists = live.finalists ?? live.heat?.finalists ?? null;
+  const gen = live.warm_start?.generation;
 
-  el.innerHTML = `
+  paint(el, `
     <div class="rail">
-      <div>
-        <div class="rail-live"><span class="pulse"></span>Round in progress — ${esc(stageLabel)}</div>
-        <div class="dim tiny" style="margin-top:4px">
-          epoch ${fmtNum(live.epoch_start_block)} · reported ${timeAgo(live.as_of)}
+      <div class="rail-head">
+        <div class="rail-live"><span class="pulse on"></span>${esc(stageLabel)} — round ${fmtNum(
+    live.epoch_start_block
+  )}</div>
+        <div class="dim tiny">
+          ${finalists != null ? `${fmtNum(finalists)} finalist${finalists === 1 ? '' : 's'} · ` : ''}${
+    gen != null ? `generation ${fmtNum(gen)} · ` : ''
+  }published ${timeAgo(live.as_of)}
         </div>
       </div>
       ${stepper(live, { compact: true })}
@@ -255,22 +306,7 @@ export function renderRail(live, liveBlock) {
             : '<div class="dim tiny">No block height</div>'
         }
       </div>
-    </div>`;
-}
-
-/** Fetch and render the live rail. Safe to call on any page; failures stay silent. */
-export async function mountRail(knownBlock) {
-  try {
-    const live = await fetchJSON('/api/cascade/live');
-    let block = knownBlock ?? null;
-    if (block == null) {
-      const subnet = await fetchJSON('/api/subnet').catch(() => null);
-      block = subnet?.data?.block_number ?? live.epoch_start_block ?? null;
-    }
-    renderRail(live, block);
-  } catch {
-    /* the rail is context, not content — a page still works without it */
-  }
+    </div>`);
 }
 
 /* ---------- inline SVG chart primitives ---------- */
@@ -333,61 +369,82 @@ export function ring(pct, { size = 56, stroke = 6, color = 'var(--accent)', trac
 let liveStatsTimer = null;
 let clockTimer = null;
 
-async function refreshTopbarStats() {
+/**
+ * What the chrome knows. The live half arrives from the stream — the topbar
+ * used to fetch `/api/cascade/live` on its own timer, which meant every page
+ * held two independent, differently-aged copies of the same round. The chain
+ * half is credit-metered, so it stays on a slow fetch of its own.
+ */
+const chrome = { live: null, mode: null, subnet: null, cfg: null, detail: null };
+
+/** Feed the chrome from a page's live subscription. */
+export function updateChrome({ live, mode, detail } = {}) {
+  if (live) chrome.live = live;
+  if (mode !== undefined) chrome.mode = mode;
+  if (detail !== undefined) chrome.detail = detail;
+  renderChrome();
+}
+
+const MODE_LOOK = {
+  stream: { cls: 'on', text: 'LIVE', title: 'Streaming — updates pushed as they are published' },
+  polling: { cls: 'warn', text: 'POLLING', title: 'Stream unavailable; refreshing on a timer' },
+  offline: { cls: 'off', text: 'OFFLINE', title: 'The receipt store could not be reached' },
+};
+
+function renderChrome() {
   const pillsEl = document.getElementById('statPills');
   const footEl = document.getElementById('sidebarStatus');
-  if (!pillsEl && !footEl) return;
+  const { live, subnet, cfg } = chrome;
+  const look = MODE_LOOK[chrome.mode] ?? { cls: '', text: 'CONNECTING', title: '' };
+  const stageLabel = live?.stages?.[live.stage_index]?.label ?? '—';
+  // Projected forward from the status doc's own timestamp, so the height keeps
+  // moving between publishes instead of sitting frozen for a minute at a time.
+  const block = projectedBlock(live?.chain) ?? subnet?.block_number ?? live?.epoch_start_block ?? null;
 
-  try {
-    const [liveRes, subnetRes, cfgRes] = await Promise.allSettled([
-      fetchJSON('/api/cascade/live'),
-      fetchJSON('/api/subnet'),
-      fetchJSON('/api/config'),
-    ]);
-    const cfg = cfgRes.status === 'fulfilled' ? cfgRes.value : null;
-    const live = liveRes.status === 'fulfilled' ? liveRes.value : null;
-    const subnet = subnetRes.status === 'fulfilled' ? subnetRes.value.data : null;
-    // Block height comes from the subnet's own free status doc; falling back to
-    // the metered chain call only if that is unavailable. "Online" now tracks
-    // that free source, so an exhausted Taostats balance no longer reads as the
-    // whole dashboard being offline.
-    const block = live?.chain?.current_block ?? subnet?.block_number ?? live?.epoch_start_block ?? null;
-    const online = liveRes.status === 'fulfilled';
-    const stageLabel = live?.stages?.[live.stage_index]?.label ?? '—';
-
-    if (pillsEl) {
-      pillsEl.innerHTML = `
-        <div class="stat-pill"><div class="pill-label">Subnet</div><div class="pill-value accent">#${esc(
-          subnet?.netuid ?? live?.netuid ?? 91
-        )}</div></div>
-        <div class="stat-pill"><div class="pill-label">Network</div><div class="pill-value">${esc(
-          live?.chain?.network ?? 'Finney'
-        )}</div></div>
-        <div class="stat-pill"><div class="pill-label">Block</div><div class="pill-value">${fmtNum(block)}</div></div>
-        <div class="stat-pill"><div class="pill-label">Round</div><div class="pill-value">${fmtNum(
-          live?.chain?.epoch_blocks ?? subnet?.tempo
-        )} blk</div></div>
-        <div class="stat-pill"><div class="pill-label">Stage</div><div class="pill-value good">${esc(
-          stageLabel
-        )}</div></div>
-        <div class="stat-pill"><div class="pill-label">Local Time</div><div class="pill-value" id="clockValue">${new Date().toLocaleTimeString()}</div></div>`;
-    }
-
-    if (footEl) {
-      footEl.innerHTML = `
-        <div class="sidebar-status-row">
-          <span class="status-dot ${online ? 'on' : 'off'}"></span>
-          <span style="color:${online ? 'var(--good)' : 'var(--critical)'}">${online ? 'ONLINE' : 'OFFLINE'}</span>
-        </div>
-        <div class="sidebar-kv"><span>Netuid</span><b>#${esc(subnet?.netuid ?? 91)}</b></div>
-        <div class="sidebar-kv"><span>Miners</span><b>${fmtNum(subnet?.active_miners)}</b></div>
-        <div class="sidebar-kv"><span>Validators</span><b>${fmtNum(subnet?.active_validators)}</b></div>
-        <div class="sidebar-kv"><span>Round stage</span><b>${esc(stageLabel)}</b></div>
-        ${creditRow(cfg?.key)}`;
-    }
-  } catch {
-    /* chrome stats are context, not content */
+  if (pillsEl) {
+    paint(pillsEl, `
+      <div class="stat-pill"><div class="pill-label">Subnet</div><div class="pill-value accent">#${esc(
+        subnet?.netuid ?? live?.netuid ?? 91
+      )}</div></div>
+      <div class="stat-pill optional"><div class="pill-label">Network</div><div class="pill-value">${esc(
+        live?.chain?.network ?? 'Finney'
+      )}</div></div>
+      <div class="stat-pill"><div class="pill-label">Block</div><div class="pill-value mono" id="blockValue">${fmtNum(
+        block
+      )}</div></div>
+      <div class="stat-pill"><div class="pill-label">Stage</div><div class="pill-value good">${esc(
+        stageLabel
+      )}</div></div>
+      <div class="stat-pill optional"><div class="pill-label">Local Time</div><div class="pill-value mono" id="clockValue">${new Date().toLocaleTimeString()}</div></div>
+      <div class="stat-pill live-pill ${look.cls}" title="${esc(look.title)}${
+      chrome.detail ? ` — ${esc(chrome.detail)}` : ''
+    }">
+        <span class="pulse ${look.cls}"></span><span class="pill-value">${look.text}</span>
+      </div>`);
   }
+
+  if (footEl) {
+    const online = chrome.mode === 'stream' || chrome.mode === 'polling';
+    paint(footEl, `
+      <div class="sidebar-status-row">
+        <span class="status-dot ${look.cls}"></span>
+        <span class="status-word ${look.cls}">${online ? look.text : 'OFFLINE'}</span>
+      </div>
+      <div class="sidebar-kv"><span>Netuid</span><b>#${esc(subnet?.netuid ?? 91)}</b></div>
+      <div class="sidebar-kv"><span>Miners</span><b>${fmtNum(subnet?.active_miners)}</b></div>
+      <div class="sidebar-kv"><span>Validators</span><b>${fmtNum(subnet?.active_validators)}</b></div>
+      <div class="sidebar-kv"><span>Round stage</span><b>${esc(stageLabel)}</b></div>
+      ${creditRow(cfg?.key)}`);
+  }
+}
+
+/** The credit-metered half of the chrome. Slow on purpose — it costs credits. */
+async function refreshTopbarStats() {
+  if (!document.getElementById('statPills') && !document.getElementById('sidebarStatus')) return;
+  const [subnetRes, cfgRes] = await Promise.allSettled([fetchJSON('/api/subnet'), fetchJSON('/api/config')]);
+  if (subnetRes.status === 'fulfilled') chrome.subnet = subnetRes.value.data;
+  if (cfgRes.status === 'fulfilled') chrome.cfg = cfgRes.value;
+  renderChrome();
 }
 
 /**
@@ -411,6 +468,17 @@ function creditRow(key) {
 function tickClock() {
   const el = document.getElementById('clockValue');
   if (el) el.textContent = new Date().toLocaleTimeString();
+  const blockEl = document.getElementById('blockValue');
+  const block = projectedBlock(chrome.live?.chain);
+  if (blockEl && block != null) {
+    const next = fmtNum(block);
+    if (blockEl.textContent !== next) {
+      blockEl.textContent = next;
+      blockEl.classList.remove('tick');
+      void blockEl.offsetWidth;
+      blockEl.classList.add('tick');
+    }
+  }
 }
 
 /**
@@ -473,9 +541,12 @@ export function mountChrome({ active } = {}) {
       </div>`;
   }
 
+  renderChrome();
   refreshTopbarStats();
   if (liveStatsTimer) clearInterval(liveStatsTimer);
-  liveStatsTimer = setInterval(refreshTopbarStats, 30_000);
+  // Credit-metered, and behind a 20–30 minute server cache anyway — polling it
+  // faster than this buys nothing and spends the free tier.
+  liveStatsTimer = setInterval(refreshTopbarStats, 120_000);
   if (clockTimer) clearInterval(clockTimer);
   clockTimer = setInterval(tickClock, 1000);
 }
@@ -543,6 +614,30 @@ export function setStatus({ stale = [], missing = [] } = {}) {
 export function markUpdated() {
   const el = document.getElementById('lastUpdated');
   if (el) el.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+}
+
+/**
+ * Writes `html` into a mount point only if it differs from what is already
+ * there. With the page repainting every few seconds this is what keeps a live
+ * dashboard usable: untouched sections keep their scroll position, their text
+ * selection and their hover state, and the ones that did change announce it
+ * with a brief highlight instead of the whole page blinking.
+ */
+export function paint(target, html) {
+  const el = typeof target === 'string' ? document.getElementById(target) : target;
+  if (!el) return false;
+  if (el.__html === html) return false;
+  const first = el.__html === undefined;
+  el.__html = html;
+  el.innerHTML = html;
+  if (!first) {
+    el.classList.remove('just-updated');
+    // Reading offsetWidth restarts the animation; without it a section that
+    // updates twice in a row only flashes once.
+    void el.offsetWidth;
+    el.classList.add('just-updated');
+  }
+  return true;
 }
 
 export function showError(container, err) {

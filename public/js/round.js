@@ -15,6 +15,7 @@ import {
   timeAgo,
   fmtDateTime,
   divergingBar,
+  lcbBar,
   barCell,
   histogramFacet,
   showError,
@@ -22,6 +23,7 @@ import {
   setTopbarTitle,
   checkCredits,
 } from './common.js';
+import { mountLive } from './live.js';
 
 mountChrome({ active: '/rounds' });
 checkCredits();
@@ -60,7 +62,7 @@ function renderHeader(round, d, epochBlocks) {
     </div>`;
 }
 
-function renderVerdict(round, d) {
+function renderVerdict(round, d, cohort) {
   const v = d.verdict;
   if (!v) {
     document.getElementById('verdict').innerHTML = `
@@ -73,7 +75,11 @@ function renderVerdict(round, d) {
     return;
   }
 
-  const cohort = Object.entries(v.cohort_lcbs ?? {});
+  // `cohort` arrives already joined to uids and generator labels; the raw
+  // receipt only names hotkeys, which is unreadable next to a uid-keyed page.
+  const entries = cohort?.entries ?? [];
+  const range =
+    Math.max(Math.abs(v.margin ?? 0), ...entries.map((e) => Math.abs(e.lcb ?? 0))) * 1.15 || 0.01;
   const domains = Object.entries(round.per_domain_win_rate ?? {});
 
   document.getElementById('verdict').innerHTML = `
@@ -124,28 +130,33 @@ function renderVerdict(round, d) {
         <div>
           <div class="panel-header"><h2>Challenger cohort</h2></div>
           <p class="panel-note">Every finalist is bootstrapped against the king; the best LCB is the one that
-            faces the margin. Cohort α is Bonferroni-split across ${fmtNum(v.cohort_k)} challengers.</p>
+            faces the margin. Cohort α is Bonferroni-split across ${fmtNum(v.cohort_k ?? cohort?.k)} challengers, so a larger field is a harder bar for each member.</p>
           <div class="table-wrap">
             <table class="data-table">
-              <thead><tr><th>Hotkey</th><th>LCB</th><th>vs margin</th></tr></thead>
+              <thead><tr><th>#</th><th>UID</th><th>Generator</th><th class="lcb-head">LCB vs win margin</th><th>Verdict</th></tr></thead>
               <tbody>
                 ${
-                  cohort.length
-                    ? cohort
-                        .sort((a, b) => b[1] - a[1])
+                  entries.length
+                    ? entries
                         .map(
-                          ([hk, lcb]) => `<tr>
-                            <td class="mono" title="${esc(hk)}">${esc(shortAddr(hk))}</td>
-                            <td class="num">${fmtFixed(lcb, 6)}</td>
+                          (e) => `<tr class="stripe ${
+                            e.clears_margin ? 'role-advanced' : e.is_leader ? 'role-challenger' : ''
+                          }">
+                            <td><span class="rank-cell">#${e.rank}</span></td>
+                            <td><strong>${e.uid != null ? esc(e.uid) : '<span class="dim">?</span>'}</strong></td>
+                            <td class="cell-clip mono" title="${esc(e.hotkey)}">${esc(
+                            e.label ?? shortAddr(e.hotkey)
+                          )}</td>
+                            <td>${lcbBar(e.lcb, v.margin, range)}</td>
                             <td>${
-                              lcb > v.margin
-                                ? '<span class="badge good">cleared</span>'
-                                : '<span class="badge plain">short by ' + fmtFixed(v.margin - lcb, 5) + '</span>'
+                              e.clears_margin
+                                ? '<span class="badge good">✓ cleared</span>'
+                                : '<span class="badge plain">short by ' + fmtFixed(v.margin - e.lcb, 5) + '</span>'
                             }</td>
                           </tr>`
                         )
                         .join('')
-                    : '<tr><td colspan="3" class="empty">No cohort recorded.</td></tr>'
+                    : '<tr><td colspan="5" class="empty">No cohort recorded.</td></tr>'
                 }
               </tbody>
             </table>
@@ -452,11 +463,13 @@ async function load() {
     return;
   }
   try {
-    const { round, detail, epoch_blocks, stale } = await fetchJSON(`/api/cascade/round/${encodeURIComponent(roundId)}`);
+    const { round, detail, cohort, epoch_blocks, stale } = await fetchJSON(
+      `/api/cascade/round/${encodeURIComponent(roundId)}`
+    );
     document.title = `Round ${round.epoch_start_block} · Cascade SN91`;
     setTopbarTitle(`Round ${fmtNum(round.epoch_start_block)}`);
     renderHeader(round, detail, epoch_blocks);
-    renderVerdict(round, detail);
+    renderVerdict(round, detail, cohort);
     renderHeat(detail);
     renderFinals(detail);
     renderRewards(detail);
@@ -469,3 +482,6 @@ async function load() {
 }
 
 load();
+
+// Keeps the topbar, status light and context rail on the round in flight.
+mountLive();

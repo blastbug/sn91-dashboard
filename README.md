@@ -76,6 +76,27 @@ across evaluation windows, and the crown only moves if the **lower confidence bo
 advantage clears a **win margin** that decays as the king's tenure grows. Emission is split down
 the reign chain, so recently dethroned kings keep earning a decaying share.
 
+**Cohort duels.** The duel is no longer one challenger against the incumbent. A cohort of `k`
+finalists is scored against the king in the same round, each with its own LCB, and `cohort_alpha`
+is the per-comparison significance level after correcting for testing k of them at once (0.05/k) —
+so a larger field is a harder bar for every member of it. `chal_uid` on the receipt is whichever
+finalist came out on top, not the only one that ran. The Overview's **Duel Cohort** board shows
+every member's Δ against the king and its LCB against the margin.
+
+**Warm starts.** Rounds resume from the previous champion's checkpoint rather than training cold;
+`status/round.json` carries the `generation` counter and names both the checkpoint in use and the
+one scheduled next.
+
+**Duel-only rounds.** When the field is small enough the heat screen is skipped and every revealed
+entrant is seated straight into the duel (`duel_only`, with `no_screen_reason` saying so). Rank is
+then reveal order and CRPS / p(best) are genuinely unscored — not missing data.
+
+**Consensus votes.** Rule changes are activated by stake-weighted validator signature. While a vote
+is open, `status/chain.json` carries the tally; the Overview renders it against its threshold. Only
+one of the validators publishing that document includes the tally, so the field blinks in and out
+about once a minute — the server holds the last sighting for 30 minutes rather than letting the
+panel flicker.
+
 ## Data sources
 
 **Cascade receipts** — `https://s3.hippius.com/cascade-manifests/receipts/`. Validators publish
@@ -114,7 +135,30 @@ subnet every 10 min, metagraph every 20 min, chain events every 60 min. Tune via
 `.env` if you move to a paid plan. For scale: the original 25-30s TTLs cost ~360 calls/hour, which
 burns the entire monthly free allowance in about 28 hours of a single open tab.
 
-All outbound calls are serialized through one queue with a 12s gap (the free tier's 5/min ceiling),
+### Live updates
+
+The free receipt store is streamed to the browser over server-sent events at `/api/stream`. The
+server polls it once every `LIVE_INTERVAL_MS` (default 10s) and fans the result out to every open
+connection, so the refresh window does not get more expensive as more tabs open it.
+
+The snapshot is split into independently hashed sections — `chain`, `round`, `commits`, `board` —
+and only the ones that actually changed are pushed. They move at wildly different rates: the block
+height changes every 12s while the 230-row commit list is identical for an hour, so sending the
+whole payload every tick meant ~98KB per client per interval to deliver a block number. Steady
+state is now a few hundred bytes. A page subscribes to the sections it renders
+(`/api/stream?parts=chain,round,board`), which is why only the miner roster pays for `commits`.
+
+Clients merge frames into a local tree and repaint through a diffing `paint()`, so sections that
+did not change keep their scroll position, text selection and hover state; ones that did flash
+briefly. Block height is projected forward from the status document's own `as_of` timestamp, so the
+counter keeps moving between publishes instead of freezing for a minute at a time.
+
+If the stream cannot be established — a proxy that buffers the response answers the headers and
+then sends nothing — a watchdog gives up after 12s and falls back to plain polling, and the topbar
+indicator says which transport is in use. Chain-backed panels never ride the stream: they are
+metered, so they stay on a 5-minute client-side refresh.
+
+All outbound Taostats calls are serialized through one queue with a 12s gap (the free tier's 5/min ceiling),
 and concurrent callers for the same resource share a single request. If a refresh fails, the last
 good copy is served and the header shows a `◷ Cached` badge naming the affected sources.
 
