@@ -10,7 +10,7 @@ import {
   fmtRao,
   fmtDuration,
   shortAddr,
-  shortGenRef,
+  genDigest,
   barCell,
   showError,
   checkCredits,
@@ -109,6 +109,9 @@ function buildRows(neurons, detail, live, currentKingUid = null) {
       registered_at: n.registered_at_block,
       // round-derived
       gen_ref: f?.gen_ref ?? h?.gen_ref ?? committed.get(uid)?.gen_ref ?? null,
+      // Miners name their own generators; the label is published free alongside
+      // the heat and is the only human-readable handle on a submission.
+      label: live?.heat?.labels?.[n.hotkey?.ss58 ?? f?.miner_hotkey ?? h?.hotkey] ?? null,
       role: f?.role ?? null,
       heat_rank: h?.rank ?? null,
       heat_crps: h?.crps ?? null,
@@ -144,8 +147,12 @@ function verifiedCell(r, certified, receipts) {
 /** Submission time, derived from the on-chain commit block against a reference height. */
 function submittedCell(r, refBlock, blockTimeS) {
   if (r.commit_block == null) return '<span class="dim tiny">—</span>';
+  // Block and age stacked rather than side by side: inline they made this the
+  // second-widest column in a table that already does not fit its panel.
   const ago =
-    refBlock != null ? `<span class="dim tiny"> ~${fmtDuration(Math.max(0, (refBlock - r.commit_block) * blockTimeS))} ago</span>` : '';
+    refBlock != null
+      ? `<div class="dim tiny">~${fmtDuration(Math.max(0, (refBlock - r.commit_block) * blockTimeS))} ago</div>`
+      : '';
   return `<span class="num">${fmtNum(r.commit_block)}</span>${ago}`;
 }
 
@@ -233,7 +240,17 @@ function render() {
 
   const maxIncentive = Math.max(...rows.map((r) => r.incentive), 1e-9);
   const maxPBest = Math.max(...rows.map((r) => r.p_best ?? 0), 1e-9);
-  const { refBlock, blockTimeS, certified, receipts } = tableMeta;
+  const { refBlock, blockTimeS, certified, receipts, showHeat } = tableMeta;
+
+  paint(
+    'lbHead',
+    `<tr>
+      <th>UID</th><th>Hotkey</th><th>Stage</th><th>Generator</th><th>Submitted</th>
+      ${showHeat ? '<th>Heat rank</th><th>CRPS</th><th>MASE</th><th>p(best)</th>' : ''}
+      <th>Verified</th><th>Round weight</th><th>Incentive</th>
+      <th>Emission (α)</th><th>Daily (α)</th><th>Stake (α)</th><th>Status</th>
+    </tr>`
+  );
 
   document.getElementById('lbBody').innerHTML = list.length
     ? list
@@ -242,16 +259,24 @@ function render() {
             <td><strong>${r.uid}</strong></td>
             <td class="mono" title="${esc(r.hotkey ?? '')}">${esc(shortAddr(r.hotkey))}</td>
             <td>${stage(r)}</td>
-            <td class="mono tiny" title="${esc(r.gen_ref ?? '')}">${esc(shortGenRef(r.gen_ref))}</td>
-            <td>${submittedCell(r, refBlock, blockTimeS)}</td>
-            <td class="num">${r.heat_rank ?? '<span class="dim">—</span>'}</td>
-            <td class="num">${fmtFixed(r.heat_crps, 6)}</td>
-            <td class="num">${fmtFixed(r.heat_mase, 5)}</td>
-            <td>${
-              r.p_best != null
-                ? barCell(r.p_best, maxPBest, { label: fmtPct(r.p_best, 2), color: 'var(--series-3)' })
-                : '<span class="dim">—</span>'
+            <td class="cell-clip" title="${esc(r.gen_ref ?? '')}">${
+              r.label
+                ? `<span class="gen-label">${esc(r.label)}</span>`
+                : `<span class="mono tiny dim">${esc(genDigest(r.gen_ref))}</span>`
             }</td>
+            <td>${submittedCell(r, refBlock, blockTimeS)}</td>
+            ${
+              showHeat
+                ? `<td class="num">${r.heat_rank ?? '<span class="dim">—</span>'}</td>
+                   <td class="num">${fmtFixed(r.heat_crps, 6)}</td>
+                   <td class="num">${fmtFixed(r.heat_mase, 5)}</td>
+                   <td>${
+                     r.p_best != null
+                       ? barCell(r.p_best, maxPBest, { label: fmtPct(r.p_best, 2), color: 'var(--series-3)' })
+                       : '<span class="dim">—</span>'
+                   }</td>`
+                : ''
+            }
             <td>${verifiedCell(r, certified, receipts)}</td>
             <td>${
               r.weight > 0 ? `<span class="badge good">${fmtFixed(r.weight, 4)}</span>` : '<span class="dim">—</span>'
@@ -270,7 +295,7 @@ function render() {
           </tr>`
         )
         .join('')
-    : `<tr><td colspan="16" class="empty">No miners match these filters.</td></tr>`;
+    : `<tr><td colspan="${showHeat ? 16 : 12}" class="empty">No miners match these filters.</td></tr>`;
 
   document.getElementById('lbCount').textContent = `${list.length} of ${rows.length}`;
 }
@@ -292,6 +317,11 @@ function rebuild() {
 
   const competing = rows.filter((r) => r.heat_rank != null).length;
   const rewarded = rows.filter((r) => r.weight > 0).length;
+  // Nothing to show is not the same as a column of dashes: in a duel-only round
+  // no screen runs, so these four never populate and only cost width.
+  tableMeta.showHeat = rows.some(
+    (r) => r.heat_rank != null || r.heat_crps != null || r.heat_mase != null || r.p_best != null
+  );
 
   paint('summary', `
       <div class="stat-grid">
@@ -391,11 +421,7 @@ async function load() {
         ${heatNote(live?.heat)}
         <div class="table-wrap scroll-cap">
           <table class="data-table">
-            <thead><tr>
-              <th>UID</th><th>Hotkey</th><th>Stage</th><th>Generator</th><th>Submitted</th>
-              <th>Heat rank</th><th>CRPS</th><th>MASE</th><th>p(best)</th><th>Verified</th>
-              <th>Round weight</th><th>Incentive</th><th>Emission (α)</th><th>Daily (α)</th><th>Stake (α)</th><th>Status</th>
-            </tr></thead>
+            <thead id="lbHead"></thead>
             <tbody id="lbBody"></tbody>
           </table>
         </div>

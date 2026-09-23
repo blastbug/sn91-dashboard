@@ -20,14 +20,16 @@
         <main id="main">
           <section id="kpis"></section>
           <section id="govStrip"></section>
+
+          <!-- The round in flight: three columns of comparable height, all
+               answering "what is happening right now". -->
           <section class="dash-grid">
             <div class="stack">
               <div id="cohort"></div>
-              <div id="validatorQueue"></div>
             </div>
             <div class="stack">
               <div id="verifyList"></div>
-              <div id="performance"></div>
+              <div id="validatorQueue"></div>
             </div>
             <div class="stack">
               <div id="pipelineCard"></div>
@@ -35,7 +37,14 @@
               <div id="activity"></div>
             </div>
           </section>
-          <section id="rankings"></section>
+
+          <!-- Standing over time. Both are ~400px tall and read badly at full
+               page width, so they share a row instead of stacking. -->
+          <section class="dash-grid-2">
+            <div id="performance"></div>
+            <div id="rankings"></div>
+          </section>
+
           <section id="benchmarks"></section>
           <section id="submissions"></section>
         </main>

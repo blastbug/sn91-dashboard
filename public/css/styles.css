@@ -98,18 +98,18 @@ a:hover {
 
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   min-height: 100vh;
 }
 
 .app.collapsed {
-  grid-template-columns: 68px 1fr;
+  grid-template-columns: 68px minmax(0, 1fr);
 }
 
 @media (max-width: 880px) {
   .app,
   .app.collapsed {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
   .sidebar {
     display: none;
@@ -460,13 +460,13 @@ h3 {
   padding: 16px 20px;
   margin-bottom: 20px;
   display: grid;
-  grid-template-columns: minmax(190px, auto) 1fr minmax(150px, auto);
+  grid-template-columns: minmax(190px, auto) minmax(0, 1fr) minmax(150px, auto);
   gap: 22px;
   align-items: center;
 }
 @media (max-width: 900px) {
   .rail {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 16px;
   }
 }
@@ -526,6 +526,7 @@ h3 {
   color: var(--ink-3);
   margin-top: 2px;
 }
+.rail .step-name,
 .rail .step-meta {
   white-space: nowrap;
   overflow: hidden;
@@ -656,36 +657,47 @@ h3 {
 
 .cols-2 {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 20px;
   align-items: start;
 }
 .cols-2-wide {
   display: grid;
-  grid-template-columns: 1.55fr 1fr;
+  grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr);
   gap: 20px;
   align-items: start;
 }
 .cols-3 {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
 }
+/* The first column carries the cohort board, which is a six-column table and
+   the widest thing on the page that is not full-bleed; the third carries short
+   key/value cards. Splitting them evenly made the table scroll sideways and
+   hide its own last column. */
 .dash-grid {
   display: grid;
-  grid-template-columns: 1.5fr 1.1fr 0.9fr;
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 1.1fr) minmax(0, 0.9fr);
   gap: 18px;
   align-items: start;
 }
 .dash-grid-2 {
   display: grid;
-  grid-template-columns: 1.3fr 1fr;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
   gap: 18px;
   align-items: start;
 }
-@media (max-width: 1200px) {
+/* Below this there is no longer room for a six-column table beside two other
+   columns. Dropping to two would strand the third stack on a row of its own
+   next to a gap, so the cohort board takes the full row instead and the two
+   card stacks share the one below it. */
+@media (max-width: 1340px) {
   .dash-grid {
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  .dash-grid > .stack:first-child {
+    grid-column: 1 / -1;
   }
 }
 @media (max-width: 1020px) {
@@ -693,12 +705,12 @@ h3 {
   .cols-2-wide,
   .dash-grid,
   .dash-grid-2 {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 @media (max-width: 900px) {
   .cols-3 {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
@@ -711,14 +723,28 @@ h3 {
 
 /* ---------- KPI cards (top row) ---------- */
 
+/* Column counts are fixed per breakpoint rather than auto-fit, because auto-fit
+   packs whatever fits and leaves the remainder stranded on a row of its own —
+   with a card count that does not divide by the packed count, that is a dead
+   block the width of the page. Every count here divides the card count. */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(168px, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1px;
   background: var(--line);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   overflow: hidden;
+}
+@media (min-width: 720px) {
+  .kpi-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+@media (min-width: 1400px) {
+  .kpi-grid {
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+  }
 }
 .kpi-card {
   background: var(--surface);
@@ -836,13 +862,24 @@ h3 {
 
 .kv {
   display: grid;
-  grid-template-columns: minmax(130px, auto) 1fr;
+  grid-template-columns: minmax(130px, auto) minmax(0, 1fr);
   gap: 7px 18px;
   margin: 0;
   font-size: 13px;
 }
+/* Inside a dashboard column there is no room for a 130px label gutter; the
+   values wrap onto two lines and the block stops reading as a table. */
+.kv.tight {
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr);
+  gap: 6px 12px;
+  font-size: 12.5px;
+}
+.kv.tight dd {
+  text-align: right;
+}
 .kv dt {
   color: var(--ink-2);
+  white-space: nowrap;
 }
 .kv dd {
   margin: 0;
@@ -880,7 +917,7 @@ h3 {
 }
 .chart-quads {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
   margin-top: 16px;
   padding-top: 16px;
@@ -894,7 +931,7 @@ h3 {
 }
 @media (max-width: 640px) {
   .chart-quads {
-    grid-template-columns: repeat(2, 1fr);
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -981,7 +1018,7 @@ h3 {
 
 .activity-row {
   display: grid;
-  grid-template-columns: 70px 1fr auto;
+  grid-template-columns: 70px minmax(0, 1fr) auto;
   gap: 12px;
   align-items: baseline;
   padding: 9px 0;
@@ -994,7 +1031,7 @@ h3 {
 
 /* One line per event, for the narrow dashboard column. */
 .activity-row.compact {
-  grid-template-columns: 58px 1fr;
+  grid-template-columns: 58px minmax(0, 1fr);
   padding: 7px 0;
   align-items: center;
 }
@@ -1023,8 +1060,37 @@ h3 {
 .table-wrap {
   overflow-x: auto;
 }
+/* Masked in local box coordinates, so the fade stays on the visible edge as the
+   content scrolls under it. Only the side with more content is faded. */
+.table-wrap.has-more {
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 46px), transparent);
+  mask-image: linear-gradient(to right, #000 calc(100% - 46px), transparent);
+}
+.table-wrap.has-prev {
+  -webkit-mask-image: linear-gradient(to right, transparent, #000 46px);
+  mask-image: linear-gradient(to right, transparent, #000 46px);
+}
+.table-wrap.has-prev.has-more {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent,
+    #000 46px,
+    #000 calc(100% - 46px),
+    transparent
+  );
+  mask-image: linear-gradient(to right, transparent, #000 46px, #000 calc(100% - 46px), transparent);
+}
 .table-wrap.scroll-cap {
   max-height: 420px;
+  overflow-y: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+/* Applied automatically to any table long enough to swamp the page. Taller than
+   scroll-cap because these are the primary listing on their panel, not a
+   supporting detail. */
+.table-wrap.is-long {
+  max-height: min(62vh, 620px);
   overflow-y: auto;
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -1256,7 +1322,7 @@ tr.is-king:hover {
 }
 .rung {
   display: grid;
-  grid-template-columns: 44px minmax(120px, 1fr) 2.2fr minmax(150px, auto);
+  grid-template-columns: 44px minmax(120px, 1fr) minmax(0, 2.2fr) minmax(150px, auto);
   gap: 16px;
   align-items: center;
   padding: 13px 16px;
@@ -1306,7 +1372,7 @@ tr.is-king:hover {
 }
 @media (max-width: 820px) {
   .rung {
-    grid-template-columns: 36px 1fr;
+    grid-template-columns: 36px minmax(0, 1fr);
     row-gap: 8px;
   }
   .rung-bar,
@@ -1537,6 +1603,22 @@ tr.is-king:hover {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.cohort-table .cell-clip {
+  max-width: 130px;
+}
+#leaderboard .cell-clip {
+  max-width: 140px;
+}
+/* Generator names are miner-chosen and can be long; the chip must truncate with
+   its cell rather than push the column wider than the table allows. */
+.cell-clip .gen-label {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
 .gen-label {
   font-family: var(--mono, 'IBM Plex Mono', monospace);
   font-size: 11.5px;
@@ -1553,15 +1635,15 @@ tr.is-king:hover {
 .lcb-cell {
   display: flex;
   align-items: center;
-  gap: 10px;
-  min-width: 170px;
+  gap: 8px;
+  min-width: 138px;
 }
 .lcb-head {
-  min-width: 190px;
+  min-width: 150px;
 }
 .lcb-num {
-  min-width: 66px;
-  font-size: 11.5px;
+  min-width: 58px;
+  font-size: 11px;
   color: var(--ink-2);
 }
 .lcb-num.good {
@@ -1574,7 +1656,7 @@ tr.is-king:hover {
   position: relative;
   flex: 1;
   height: 9px;
-  min-width: 92px;
+  min-width: 70px;
   /* Lighter than the usual sunk fill: a violet bar on near-black reads as no
      bar at all, and the positive side of this scale is the interesting side. */
   background: var(--line);

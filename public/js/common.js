@@ -69,6 +69,21 @@ export function shortGenRef(ref) {
   return `${name}@${algo ? algo + ':' : ''}${hex.slice(0, 8)}…`;
 }
 
+/**
+ * Just the digest head. Every generator ref on the subnet starts
+ * `vault/direct@sha256:`, so in a table the prefix is 20 identical characters
+ * per row buying nothing — and it was costing this column 380px of the 1108 the
+ * panel has. The full ref stays in the cell's title.
+ */
+export function genDigest(ref, n = 10) {
+  if (!ref) return '—';
+  const at = String(ref).lastIndexOf('@');
+  const digest = at >= 0 ? String(ref).slice(at + 1) : String(ref);
+  const colon = digest.indexOf(':');
+  const hex = colon >= 0 ? digest.slice(colon + 1) : digest;
+  return `${hex.slice(0, n)}…`;
+}
+
 export function shortDigest(d, n = 12) {
   if (!d) return '—';
   const s = String(d);
@@ -251,15 +266,27 @@ export function stepper(live, { compact = false, vertical = false } = {}) {
     ${stages
       .map((s, i) => {
         const state = idx < 0 ? '' : i < idx ? 'done' : i === idx ? 'active' : '';
-        let meta = compact ? '' : s.blurb;
-        if (i === idx && s.key === 'heat' && live.heat_total) {
-          meta = `${fmtNum(live.heat_done)} of ${fmtNum(live.heat_total)} slots trained`;
-        } else if (i === idx && s.key === 'validation') {
-          const done = (live.validators ?? []).filter((v) => v.published).length;
-          meta = `${done} of ${(live.validators ?? []).length} validators reported`;
-        } else if (compact) {
-          meta = '';
+
+        // What the stage in flight is actually doing, where that is knowable.
+        let live_meta = null;
+        if (i === idx) {
+          if (s.key === 'heat' && live.heat_total) {
+            live_meta = `${fmtNum(live.heat_done)} of ${fmtNum(live.heat_total)} slots trained`;
+          } else if (s.key === 'duel' && live.finalists) {
+            live_meta = `${fmtNum(live.finalists)} finalist${live.finalists === 1 ? '' : 's'} against the king`;
+          } else if (s.key === 'validation') {
+            const done = (live.validators ?? []).filter((v) => v.published).length;
+            live_meta = `${done} of ${(live.validators ?? []).length} validators reported`;
+          }
         }
+
+        // A column that explains all four stages at once is mostly prose about
+        // stages that are over. Vertically, only the stage in flight explains
+        // itself; the wide horizontal strip has room for the whole story.
+        let meta;
+        if (compact) meta = live_meta ?? '';
+        else if (vertical) meta = i === idx ? live_meta ?? s.blurb : '';
+        else meta = live_meta ?? s.blurb;
         return `<div class="${vertical ? 'step-v' : 'step'} ${state}">
           <div class="step-idx">${i + 1}</div>
           <div style="min-width:0">
@@ -614,6 +641,8 @@ export function setStatus({ stale = [], missing = [] } = {}) {
 export function markUpdated() {
   const el = document.getElementById('lastUpdated');
   if (el) el.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+  // Pages that build their tables with raw innerHTML all reach here afterwards.
+  markScrollEdges();
 }
 
 /**
@@ -623,6 +652,47 @@ export function markUpdated() {
  * selection and their hover state, and the ones that did change announce it
  * with a brief highlight instead of the whole page blinking.
  */
+/**
+ * A table too wide for its panel scrolls sideways, but with nothing marking the
+ * boundary the cut column reads as a rendering fault rather than as more
+ * content. Fading the edge that has more behind it — and only that edge — says
+ * which way to scroll without taking space from the table.
+ */
+function updateScrollEdges(wrap) {
+  const max = wrap.scrollWidth - wrap.clientWidth;
+  wrap.classList.toggle('has-more', max > 2 && wrap.scrollLeft < max - 2);
+  wrap.classList.toggle('has-prev', max > 2 && wrap.scrollLeft > 2);
+}
+
+/**
+ * Past this many rows a table stops being a section of the page and becomes the
+ * page: the full metagraph ran to 10,700px and the receipt list to 17,900px, so
+ * every panel underneath them was effectively unreachable. Long tables get
+ * their own scroll pane instead — the column headers are already sticky, so
+ * they stay readable inside it.
+ */
+const LONG_TABLE_ROWS = 25;
+
+export function markScrollEdges(root = document) {
+  for (const wrap of root.querySelectorAll?.('.table-wrap') ?? []) {
+    if (!wrap.__edgesBound) {
+      wrap.addEventListener('scroll', () => updateScrollEdges(wrap), { passive: true });
+      wrap.__edgesBound = true;
+    }
+    if (!wrap.classList.contains('scroll-cap')) {
+      const rows = wrap.querySelectorAll('tbody tr').length;
+      wrap.classList.toggle('is-long', rows > LONG_TABLE_ROWS);
+    }
+    updateScrollEdges(wrap);
+  }
+}
+
+let edgeResize = null;
+window.addEventListener('resize', () => {
+  clearTimeout(edgeResize);
+  edgeResize = setTimeout(() => markScrollEdges(), 150);
+});
+
 export function paint(target, html) {
   const el = typeof target === 'string' ? document.getElementById(target) : target;
   if (!el) return false;
@@ -630,6 +700,7 @@ export function paint(target, html) {
   const first = el.__html === undefined;
   el.__html = html;
   el.innerHTML = html;
+  markScrollEdges();
   if (!first) {
     el.classList.remove('just-updated');
     // Reading offsetWidth restarts the animation; without it a section that

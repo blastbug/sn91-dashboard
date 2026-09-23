@@ -112,13 +112,6 @@ function renderKpis({ live, latest, rewards, metagraph, rounds: roundsHist }) {
     ? live.validators.filter((v) => v.published).length / live.validators.length
     : null;
 
-  // 7. Heat participation this round: what fraction of submissions got screened
-  //    at all (the rest were filtered before any compute was spent on them).
-  const heatSeries = series(rounds, 20, (r) => r.heat?.n_entrants);
-  const submitted = live?.submission_counts?.submitted;
-  const screened = live?.submission_counts?.screened;
-  const heatFillPct = submitted ? (screened / submitted) * 100 : null;
-
   const cards = [
     kpiCard({
       label: 'King Geomean',
@@ -166,13 +159,6 @@ function renderKpis({ live, latest, rewards, metagraph, rounds: roundsHist }) {
       trendHtml: `<span class="kpi-trend flat">${(live?.validators ?? []).filter((v) => v.published).length}/${
         (live?.validators ?? []).length
       } reported</span>`,
-    }),
-    kpiCard({
-      label: 'Heat Fill Rate',
-      value: heatFillPct != null ? fmtPct(heatFillPct / 100, 0) : '—',
-      sub: 'screened / submitted',
-      spark: sparkline(heatSeries, { color: 'var(--series-4)' }),
-      trendHtml: `<span class="kpi-trend flat">${fmtNum(screened)} / ${fmtNum(submitted)}</span>`,
     }),
   ];
 
@@ -224,13 +210,6 @@ function renderCohort(latest, live) {
           e.delta != null ? `${e.delta >= 0 ? '+' : ''}${e.delta.toFixed(5)}` : '—'
         }</td>
         <td>${lcbBar(e.lcb, c.margin, range)}</td>
-        <td>${
-          e.clears_margin
-            ? '<span class="badge good">✓ clears</span>'
-            : e.is_leader
-            ? '<span class="badge accent">best of field</span>'
-            : '<span class="dim tiny">short</span>'
-        }</td>
       </tr>`;
     })
     .join('');
@@ -270,7 +249,7 @@ function renderCohort(latest, live) {
         <table class="data-table cohort-table">
           <thead><tr>
             <th>#</th><th>UID</th><th>Generator</th><th>Δ vs king</th>
-            <th class="lcb-head">LCB vs win margin</th><th>Verdict</th>
+            <th class="lcb-head">LCB vs win margin</th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
@@ -566,18 +545,13 @@ function renderPipeline(live) {
             )} left</span></div>`
           : ''
       }
-      <dl class="kv" style="margin-top:14px">
-        <dt>Field</dt><dd>${fmtNum(live?.finalists)} finalist${live?.finalists === 1 ? '' : 's'}${
-    live?.heat?.duel_only ? ' · no heat screen' : ''
-  }</dd>
-        <dt>Warm start</dt><dd>${
-          ws?.generation != null ? `generation ${fmtNum(ws.generation)}` : ws?.active ? 'on' : 'cold start'
+      <dl class="kv tight" style="margin-top:14px">
+        <dt>Field</dt><dd>${fmtNum(live?.finalists)}${live?.heat?.duel_only ? ' · duel-only' : ' finalists'}</dd>
+        <dt>Generation</dt><dd>${
+          ws?.generation != null ? fmtNum(ws.generation) : ws?.active ? 'warm' : 'cold start'
         }</dd>
-        <dt>Windows</dt><dd>${
-          windows
-            ? `heat ${fmtDuration(windows.heat_seconds)} · duel ${fmtDuration(windows.duel_seconds)}`
-            : '—'
-        }</dd>
+        <dt>Heat window</dt><dd>${windows ? fmtDuration(windows.heat_seconds) : '—'}</dd>
+        <dt>Duel window</dt><dd>${windows ? fmtDuration(windows.duel_seconds) : '—'}</dd>
       </dl>
     </div>`);
 }
