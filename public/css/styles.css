@@ -682,6 +682,86 @@ h3 {
   gap: 18px;
   align-items: start;
 }
+/* Overview rows. Every row is two columns, so each block gets roughly twice
+   the width it had in the old three-column grid; the ratios differ only by how
+   much the left-hand block needs. */
+.row-2,
+.row-2-lead,
+.row-2-trail,
+.row-3 {
+  display: grid;
+  gap: 18px;
+  align-items: start;
+}
+.row-3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+/* A four-column module shared by the two rows below the duel board, so the
+   narrow cards in each line up with one another rather than each row inventing
+   its own rhythm. */
+.row-quarter,
+.row-trio {
+  display: grid;
+  gap: 18px;
+  align-items: start;
+}
+.row-quarter {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 3fr);
+}
+.row-trio {
+  /* The middle column is the widest because its entrant cards pair up two
+     across — below roughly 420px of inner width they fall back to one per
+     line and the card becomes half again as tall as the two beside it. */
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1.65fr) minmax(0, 1fr);
+}
+@media (max-width: 1400px) {
+  .row-trio {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  /* The chart is the one that suffers most from a half-width column. */
+  .row-trio > :first-child {
+    grid-column: 1 / -1;
+  }
+}
+/* Below this a quarter column is too narrow for the pipeline's key/value rows,
+   and half a row is too narrow for the entrant cards to pair. Both do better
+   with the full width than with a share of it. */
+@media (max-width: 1180px) {
+  .row-quarter,
+  .row-trio,
+  .row-trio > :first-child {
+    grid-column: auto;
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+@media (max-width: 1180px) {
+  .row-3 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 820px) {
+  .row-3 {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+.row-2 {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+}
+.row-2-lead {
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+}
+.row-2-trail {
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+}
+@media (max-width: 1080px) {
+  .row-2,
+  .row-2-lead,
+  .row-2-trail {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .dash-grid-2 {
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
@@ -816,13 +896,15 @@ h3 {
   overflow: hidden;
 }
 /* Four tiles inside a dashboard column wrap to 3 + 1, leaving a dead cell.
-   Pinning them to two rows of two keeps the block rectangular at any width. */
+   Pinning them to two rows of two keeps the block rectangular — but in a
+   full-width panel two rows of two is just two very wide tiles, so there they
+   go back to a single row of four. */
 .stat-grid.quad {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
-@media (min-width: 1400px) {
-  .dash-grid .stat-grid.quad {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+@media (min-width: 1100px) {
+  #cohort .stat-grid.quad {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
   }
 }
 
@@ -887,6 +969,20 @@ h3 {
   /* break-word, not anywhere: a merely-narrow column should wrap between
      words, not fracture a short label or number mid-character */
   overflow-wrap: break-word;
+}
+
+.health-rings {
+  display: flex;
+  justify-content: space-around;
+  gap: 8px;
+  margin-top: 4px;
+}
+.health-ring {
+  text-align: center;
+  min-width: 0;
+}
+.health-ring .dim {
+  margin-top: 8px;
 }
 
 /* ---------- chart card ---------- */
@@ -970,20 +1066,26 @@ h3 {
 /* ---------- verification list ---------- */
 
 .verify-list {
+  /* Wrapping flex rather than a grid: a grid with an odd entrant count leaves
+     its last cell empty, which reads as a hole punched in the panel. Here the
+     last card simply grows into the rest of its row. Dividers come from each
+     card's own shadow, which costs no layout space. */
   display: flex;
-  flex-direction: column;
-  gap: 1px;
-  background: var(--line);
+  flex-wrap: wrap;
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: 9px;
   overflow: hidden;
 }
 .verify-item {
   background: var(--surface);
-  padding: 12px 14px;
+  padding: 9px 13px;
   display: flex;
   align-items: center;
   gap: 13px;
+  flex: 1 1 200px;
+  min-width: 0;
+  box-shadow: 1px 0 0 var(--line), 0 1px 0 var(--line);
 }
 .verify-meta {
   min-width: 0;
@@ -1597,6 +1699,13 @@ tr.is-king:hover {
 .cohort-table td:first-child {
   width: 44px;
 }
+/* A six-column table across the full page otherwise spreads its columns into
+   the slack. Letting the last column take all of it keeps the identifying
+   columns packed together and gives the bar the room instead. */
+.cohort-table th:last-child,
+.cohort-table td:last-child {
+  width: 100%;
+}
 .cell-clip {
   max-width: 190px;
   overflow: hidden;
@@ -1609,17 +1718,15 @@ tr.is-king:hover {
 #leaderboard .cell-clip {
   max-width: 140px;
 }
-/* Generator names are miner-chosen and can be long; the chip must truncate with
-   its cell rather than push the column wider than the table allows. */
-.cell-clip .gen-label {
+/* Generator names are miner-chosen and can be long; the chip truncates with
+   whatever holds it rather than setting that container's minimum width. */
+.gen-label {
   display: inline-block;
   max-width: 100%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   vertical-align: bottom;
-}
-.gen-label {
   font-family: var(--mono, 'IBM Plex Mono', monospace);
   font-size: 11.5px;
   color: var(--accent);

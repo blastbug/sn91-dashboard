@@ -18,6 +18,7 @@ import {
   ring,
   showError,
   checkCredits,
+  barCell,
   paint,
   projectedBlock,
   lcbBar,
@@ -182,8 +183,10 @@ function renderCohort(latest, live) {
 
   if (!c) {
     paint('cohort', `<div class="panel">
-      <div class="panel-header"><h2>Duel Cohort</h2></div>
-      <div class="empty">The last published round was not scored as a cohort duel.</div>
+      <div class="panel-header"><h2>The Duel</h2></div>
+      <div class="empty">The last published round carries no verdict — it was ${esc(
+        round?.status ?? 'not scored'
+      )}${round?.reject_reason ? `: ${esc(round.reject_reason)}` : ''}.</div>
     </div>`);
     return;
   }
@@ -217,15 +220,22 @@ function renderCohort(latest, live) {
   paint('cohort', `
     <div class="panel">
       <div class="panel-header">
-        <h2>Duel Cohort — ${fmtNum(c.k)} vs the king</h2>
+        <h2>${
+          c.is_cohort ? `Duel Cohort — ${fmtNum(c.k)} vs the king` : 'The Duel — challenger vs the king'
+        }</h2>
         ${verdict}
       </div>
       <p class="panel-note">
-        Every finalist is scored against king <strong>uid ${esc(c.king.uid ?? '—')}</strong> over the same
-        windows. <strong>Δ</strong> is how much better its raw score was; <strong>LCB</strong> is the 95% lower
-        bound on that improvement, and the crown only moves if the LCB clears the win margin (the green mark).
-        Beating the king on raw score is not enough. Testing ${fmtNum(c.k)} challengers at once tightens each
-        one's significance level to α = ${fmtFixed(c.alpha, 4)}.
+        ${c.is_cohort ? 'Every finalist is' : 'The challenger is'} scored against king
+        <strong>uid ${esc(c.king.uid ?? '—')}</strong> over the same windows. <strong>Δ</strong> is how much
+        better its raw score was; <strong>LCB</strong> is the 95% lower bound on that improvement, and the
+        crown only moves if the LCB clears the win margin (the green mark) — beating the king on raw score is
+        not enough.${
+          c.is_cohort
+            ? ` Testing ${fmtNum(c.k)} challengers at once tightens each one's significance level to
+               α = ${fmtFixed(c.alpha, 4)}.`
+            : ''
+        }
       </p>
       <div class="stat-grid quad" style="margin-bottom:14px">
         <div class="stat-tile"><div class="stat-label">King geomean</div><div class="stat-value">${fmtFixed(
@@ -238,9 +248,9 @@ function renderCohort(latest, live) {
         )}</div><div class="stat-sub">LCB must exceed</div></div>
         <div class="stat-tile"><div class="stat-label">Cleared it</div><div class="stat-value ${
           c.n_clears ? 'good' : ''
-        }">${fmtNum(c.n_clears)}<span class="unit">of ${fmtNum(c.k)}</span></div><div class="stat-sub">${
-    c.dethroned ? 'crown changed hands' : 'king defended'
-  }</div></div>
+        }">${fmtNum(c.n_clears)}${
+    c.is_cohort ? `<span class="unit">of ${fmtNum(c.k)}</span>` : ''
+  }</div><div class="stat-sub">${c.dethroned ? 'crown changed hands' : 'king defended'}</div></div>
         <div class="stat-tile"><div class="stat-label">Warm start</div><div class="stat-value">${
           live?.warm_start?.generation != null ? `gen ${fmtNum(live.warm_start.generation)}` : c.warm_start ? 'on' : 'cold'
         }</div><div class="stat-sub">${esc(live?.heat?.screen_size ?? round?.sizes?.[0] ?? '—')}</div></div>
@@ -315,10 +325,11 @@ function renderRankings(metagraph, latest) {
   const kingUid = round?.post_round_king_uid ?? round?.king_uid;
   const chalUid = round?.chal_uid;
 
-  const ranked = [...(metagraph ?? [])]
+  const miners = [...(metagraph ?? [])]
     .filter((n) => !n.validator_permit)
-    .sort((a, b) => Number(b.incentive) - Number(a.incentive))
-    .slice(0, 8);
+    .sort((a, b) => Number(b.incentive) - Number(a.incentive));
+  const ranked = miners.slice(0, 8);
+  const maxIncentive = Math.max(...miners.map((n) => Number(n.incentive) || 0), 1e-9);
 
   const medal = (i) => (i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : null);
 
@@ -348,7 +359,7 @@ function renderRankings(metagraph, latest) {
                       ? '<span class="badge accent">challenger</span>'
                       : '<span class="dim tiny">miner</span>'
                   }</td>
-                  <td class="num">${fmtFixed(n.incentive, 4)}</td>
+                  <td>${barCell(Number(n.incentive), maxIncentive, { label: fmtFixed(n.incentive, 4) })}</td>
                   <td class="num">${fmtRao(n.daily_reward, 2)}</td>
                 </tr>`;
               })
@@ -411,9 +422,9 @@ function renderPerformance(roundsHist) {
 
     paint('perfQuads', `
       <div class="chart-quad"><div class="stat-label">Average</div><div class="stat-value">${fmtFixed(mean, 4)}</div></div>
-      <div class="chart-quad"><div class="stat-label">Best (lowest)</div><div class="stat-value">${fmtFixed(best, 4)}</div></div>
-      <div class="chart-quad"><div class="stat-label">Worst (highest)</div><div class="stat-value">${fmtFixed(worst, 4)}</div></div>
-      <div class="chart-quad"><div class="stat-label">Std Dev</div><div class="stat-value">${fmtFixed(std, 4)}</div></div>`);
+      <div class="chart-quad"><div class="stat-label">Best</div><div class="stat-value">${fmtFixed(best, 4)}</div></div>
+      <div class="chart-quad"><div class="stat-label">Worst</div><div class="stat-value">${fmtFixed(worst, 4)}</div></div>
+      <div class="chart-quad"><div class="stat-label">Std dev</div><div class="stat-value">${fmtFixed(std, 4)}</div></div>`);
 
     document.querySelectorAll('.chart-tab').forEach((btn) => {
       btn.classList.toggle('active', Number(btn.dataset.range) === chartRange);
@@ -471,11 +482,9 @@ function renderVerification(live) {
       <p class="panel-note">
         ${
           heat?.duel_only
-            ? `This is a <strong>duel-only</strong> round: every revealed generator is seated straight into
-               the duel with no CRPS screen, so rank is reveal order and p(best) is not scored yet.`
-            : `Ring shows each entrant's bootstrap <strong>p(best)</strong> — the probability it is genuinely the
-               top generator of the field.`
-        } <a href="/#submissions" onclick="document.getElementById('submissions').scrollIntoView({behavior:'smooth'})">Full list of ${fmtNum(
+            ? `<strong>Duel-only</strong> round — seated in reveal order, no CRPS screen.`
+            : `Ring shows each entrant's bootstrap <strong>p(best)</strong>.`
+        } <a href="/#submissions" onclick="document.getElementById('submissions').scrollIntoView({behavior:'smooth'})">All ${fmtNum(
     live?.submission_counts?.submitted
   )} submissions ↓</a>
       </p>
@@ -546,7 +555,9 @@ function renderPipeline(live) {
           : ''
       }
       <dl class="kv tight" style="margin-top:14px">
-        <dt>Field</dt><dd>${fmtNum(live?.finalists)}${live?.heat?.duel_only ? ' · duel-only' : ' finalists'}</dd>
+        <dt>Field</dt><dd>${fmtNum(live?.finalists ?? live?.heat?.finalists)}${
+    live?.heat?.duel_only ? ' · duel-only' : ' finalists'
+  }</dd>
         <dt>Generation</dt><dd>${
           ws?.generation != null ? fmtNum(ws.generation) : ws?.active ? 'warm' : 'cold start'
         }</dd>
@@ -556,105 +567,40 @@ function renderPipeline(live) {
     </div>`);
 }
 
-function renderValidatorQueue(live) {
-  const vs = live?.validators ?? [];
-  paint('validatorQueue', `
-    <div class="panel">
-      <div class="panel-header">
-        <h2>Verification Queue</h2>
-        <span class="badge plain">${vs.filter((v) => v.published).length}/${vs.length}</span>
-      </div>
-      <div class="table-wrap">
-        <table class="data-table">
-          <thead><tr><th>Validator</th><th>Status</th><th>Time</th></tr></thead>
-          <tbody>
-            ${
-              vs.length
-                ? vs
-                    .map(
-                      (v) => `<tr>
-                        <td class="mono" title="${esc(v.hotkey)}">${esc(shortAddr(v.hotkey, 6, 4))}</td>
-                        <td>${
-                          !v.published
-                            ? '<span class="badge warning">◷ pending</span>'
-                            : v.status === 'scored'
-                            ? '<span class="badge good">✓ certified</span>'
-                            : '<span class="badge critical">✕ refused</span>'
-                        }</td>
-                        <td class="dim tiny">${v.published_at ? timeAgo(v.published_at) : '—'}</td>
-                      </tr>`
-                    )
-                    .join('')
-                : '<tr><td colspan="3" class="empty">No validators seen.</td></tr>'
-            }
-          </tbody>
-        </table>
-      </div>
-    </div>`);
-}
-
 function renderChainHealth(subnet, live) {
   const keysPct = subnet ? (subnet.active_keys / subnet.max_neurons) * 100 : 0;
   const c = live?.submission_counts;
   const fillPct = c?.submitted ? (c.screened / c.submitted) * 100 : 0;
+  // Validator certification moved here when the Verification Queue panel went:
+  // it is the same fact, and this card is where the other health gauges live.
+  const validators = live?.validators ?? [];
+  const reported = validators.filter((v) => v.published).length;
+  const certPct = validators.length ? (reported / validators.length) * 100 : 0;
 
   paint('chainHealth', `
     <div class="panel">
       <div class="panel-header"><h2>Chain Health</h2></div>
-      <div style="display:flex;justify-content:space-around;gap:10px;margin-top:4px">
-        <div style="text-align:center">
+      <div class="health-rings">
+        <div class="health-ring">
           ${ring(keysPct, { size: 68, stroke: 7, color: 'var(--series-1)' })}
-          <div class="dim tiny" style="margin-top:8px">Keys Used<br>${fmtNum(subnet?.active_keys)}/${fmtNum(
-    subnet?.max_neurons
-  )}</div>
+          <div class="dim tiny">Keys used<br>${fmtNum(subnet?.active_keys)}/${fmtNum(subnet?.max_neurons)}</div>
         </div>
-        <div style="text-align:center">
+        <div class="health-ring">
           ${ring(fillPct, { size: 68, stroke: 7, color: 'var(--series-4)' })}
-          <div class="dim tiny" style="margin-top:8px">Heat Fill<br>${fmtNum(c?.screened)}/${fmtNum(c?.submitted)}</div>
+          <div class="dim tiny">Screened<br>${fmtNum(c?.screened)}/${fmtNum(c?.submitted)}</div>
+        </div>
+        <div class="health-ring">
+          ${ring(certPct, { size: 68, stroke: 7, color: 'var(--good)' })}
+          <div class="dim tiny">Certified<br>${fmtNum(reported)} / ${fmtNum(validators.length)}</div>
         </div>
       </div>
-      <dl class="kv" style="margin-top:16px">
+      <dl class="kv tight" style="margin-top:14px">
         <dt>Immunity</dt><dd>${fmtNum(subnet?.immunity_period)} blk</dd>
         <dt>Min burn</dt><dd>${fmtRao(subnet?.min_burn, 3)} τ</dd>
+        <dt>Alpha</dt><dd>${
+          live?.chain?.alpha_price_tao != null ? `${live.chain.alpha_price_tao.toFixed(6)} τ` : '—'
+        }</dd>
       </dl>
-    </div>`);
-}
-
-function renderActivity(events) {
-  const CATEGORY = {
-    registered: { label: 'REG', color: 'var(--series-1)' },
-    deregistered: { label: 'DEREG', color: 'var(--series-2)' },
-    stake_added: { label: 'STAKE+', color: 'var(--good)' },
-    stake_removed: { label: 'STAKE-', color: 'var(--warning)' },
-  };
-  const rows = (events ?? []).slice(0, 3);
-
-  paint('activity', `
-    <div class="panel">
-      <div class="panel-header"><h2>Recent Activity</h2><a class="small" href="/miners">View all →</a></div>
-      ${
-        rows.length
-          ? rows
-              .map((ev) => {
-                const meta = CATEGORY[ev.category] ?? { label: ev.category, color: 'var(--ink-3)' };
-                const detail =
-                  ev.category === 'registered'
-                    ? `uid ${ev.uid} registered`
-                    : ev.category === 'deregistered'
-                    ? `uid ${ev.uid} deregistered`
-                    : `${fmtRao(ev.amount, 3)} τ ${ev.category === 'stake_added' ? 'staked to' : 'unstaked from'} ${shortAddr(
-                        ev.delegate
-                      )}`;
-                return `<div class="activity-row compact" title="block ${fmtNum(ev.block_number)}">
-                  <span class="activity-time">${timeAgo(ev.timestamp)}</span>
-                  <span class="activity-msg"><span class="badge" style="color:${meta.color}">${meta.label}</span> ${esc(
-                  detail
-                )}</span>
-                </div>`;
-              })
-              .join('')
-          : '<div class="empty">No recent chain events.</div>'
-      }
     </div>`);
 }
 
@@ -862,7 +808,6 @@ const state = {
   rewards: null,
   subnet: null,
   metagraph: null,
-  events: null,
   bench: null,
 };
 
@@ -877,7 +822,6 @@ function renderLiveTier() {
   renderGovernance(live);
   renderCohort(latest, live);
   renderVerification(live);
-  renderValidatorQueue(live);
   renderPipeline(live);
   renderSubmissionsTable(live);
   renderKpis(state);
@@ -888,12 +832,11 @@ function renderLiveTier() {
  * boundary, so it is fetched once on load and then only every few minutes.
  */
 async function loadMeteredTier() {
-  const [rr, rwr, sr, mr, er, br] = await Promise.all([
+  const [rr, rwr, sr, mr, br] = await Promise.all([
     attempt('/api/cascade/rounds'),
     attempt('/api/rewards'),
     attempt('/api/subnet'),
     attempt('/api/metagraph'),
-    attempt('/api/events'),
     attempt('/api/cascade/benchmarks'),
   ]);
   const val = (r) => (r.ok ? r.value : null);
@@ -902,17 +845,15 @@ async function loadMeteredTier() {
   state.rewards = val(rwr) ?? state.rewards;
   state.subnet = val(sr)?.data ?? state.subnet;
   state.metagraph = val(mr)?.data ?? state.metagraph;
-  state.events = val(er)?.events ?? state.events;
   state.bench = val(br) ?? state.bench;
 
   if (state.rounds) renderPerformance(state.rounds);
   renderRankings(state.metagraph ?? [], state.latest);
   renderChainHealth(state.subnet, state.live);
-  renderActivity(state.events ?? []);
   renderBenchmarks(state.bench);
   renderKpis(state);
 
-  const missing = [!sr.ok && 'subnet', !mr.ok && 'metagraph', !er.ok && 'events'].filter(Boolean);
+  const missing = [!sr.ok && 'subnet', !mr.ok && 'metagraph'].filter(Boolean);
   const stale = [state.live?.stale && 'live status', state.latest?.stale && 'rounds'].filter(Boolean);
   setStatus({ stale, missing });
 }

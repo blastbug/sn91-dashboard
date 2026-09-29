@@ -270,10 +270,28 @@ function hotkeyDirectory(rounds, ...live) {
  * finalist came out on top.
  */
 function cohortTable(round, dir, { breakdowns = false, labels = {} } = {}) {
-  const lcbs = round?.cohort_lcbs;
-  if (!lcbs || !Object.keys(lcbs).length) return null;
-  const geomeans = round.cohort_geomeans ?? {};
+  if (!round) return null;
   const margin = round.margin ?? null;
+
+  // Not every round is a cohort duel — the subnet still runs classic
+  // single-challenger rounds, which carry the same verdict fields without the
+  // per-hotkey maps. Presenting that as "no cohort" left the page's primary
+  // panel empty on exactly the rounds where the crown actually changed hands,
+  // so a lone challenger is shown as a cohort of one.
+  const lcbs =
+    round.cohort_lcbs && Object.keys(round.cohort_lcbs).length
+      ? round.cohort_lcbs
+      : round.chal_hotkey && Number.isFinite(round.lcb)
+      ? { [round.chal_hotkey]: round.lcb }
+      : null;
+  if (!lcbs) return null;
+
+  const geomeans =
+    round.cohort_geomeans && Object.keys(round.cohort_geomeans).length
+      ? round.cohort_geomeans
+      : round.chal_hotkey && round.chal_geomean != null
+      ? { [round.chal_hotkey]: round.chal_geomean }
+      : {};
 
   const entries = Object.entries(lcbs)
     .map(([hotkey, lcb]) => ({
@@ -303,6 +321,8 @@ function cohortTable(round, dir, { breakdowns = false, labels = {} } = {}) {
 
   return {
     k: round.cohort_k ?? entries.length,
+    /** False when the board was reconstructed from a single-challenger round. */
+    is_cohort: Boolean(round.cohort_k),
     alpha: round.cohort_alpha ?? null,
     margin,
     n_clears: entries.filter((e) => e.clears_margin).length,

@@ -21,28 +21,24 @@
           <section id="kpis"></section>
           <section id="govStrip"></section>
 
-          <!-- The round in flight: three columns of comparable height, all
-               answering "what is happening right now". -->
-          <section class="dash-grid">
-            <div class="stack">
-              <div id="cohort"></div>
-            </div>
-            <div class="stack">
-              <div id="verifyList"></div>
-              <div id="validatorQueue"></div>
-            </div>
-            <div class="stack">
-              <div id="pipelineCard"></div>
-              <div id="chainHealth"></div>
-              <div id="activity"></div>
-            </div>
+          <!-- The duel board is a table: it gets a row to itself so the row
+               reads across in one line rather than being folded into a column. -->
+          <section id="cohort"></section>
+
+          <!-- Quarter/three-quarters: the pipeline is a stage list and a short
+               key/value block, the leaderboard is a six-column table. -->
+          <section class="row-quarter">
+            <div id="pipelineCard"></div>
+            <div id="rankings"></div>
           </section>
 
-          <!-- Standing over time. Both are ~400px tall and read badly at full
-               page width, so they share a row instead of stacking. -->
-          <section class="dash-grid-2">
+          <!-- The remaining three, widest-first: the chart wants room, the
+               entrant cards pair up, the rings sit in the quarter column so
+               they line up under the pipeline above. -->
+          <section class="row-trio">
             <div id="performance"></div>
-            <div id="rankings"></div>
+            <div id="verifyList"></div>
+            <div id="chainHealth"></div>
           </section>
 
           <section id="benchmarks"></section>
