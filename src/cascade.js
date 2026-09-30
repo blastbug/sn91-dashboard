@@ -558,6 +558,34 @@ export const STAGES = [
  * presented as live when its epoch_start_block matches the round in flight —
  * otherwise a dashboard shows last round's ranking as this round's.
  */
+/** Age of a published timestamp in seconds, or null if it cannot be read. */
+function ageSeconds(ts) {
+  if (!ts) return null;
+  const t = Date.parse(ts);
+  return Number.isFinite(t) ? Math.max(0, Math.round((Date.now() - t) / 1000)) : null;
+}
+
+/**
+ * Where the round must be, worked out from the chain alone.
+ *
+ * The trainer publishes its own stage document, but that is a separate writer
+ * from the chain mirror and it can stop while the tournament carries on — it
+ * has been stopped since epoch 9133200 while the chain ran on for 54 more
+ * rounds. The stage windows are published on the chain doc, so the position
+ * within the epoch gives the stage without the trainer having to say so.
+ */
+function deriveStage(chainDoc) {
+  const block = chainDoc?.current_block;
+  const start = chainDoc?.epoch_start_block;
+  if (block == null || start == null) return null;
+  const elapsed = (block - start) * (chainDoc.block_time_s ?? 12);
+  const heat = chainDoc.stage_windows?.heat_seconds ?? 4500;
+  const duel = chainDoc.stage_windows?.duel_seconds ?? 11700;
+  if (elapsed < heat) return 'heat';
+  if (elapsed < heat + duel) return 'duel';
+  return 'validation';
+}
+
 async function liveStatus() {
   // status/chain.json is what the subnet's own dashboard runs on. It is free and
   // unmetered, and carries the live block height, the alpha price and this
@@ -575,16 +603,32 @@ async function liveStatus() {
   const chainDoc = chainRes.status === 'fulfilled' ? chainRes.value.data : null;
   const index = idx.status === 'fulfilled' ? idx.value : null;
 
-  const epoch = status?.epoch_start_block ?? null;
-  const roundId = status?.round_id != null ? String(status.round_id) : null;
+  // The chain mirror is the authority on which epoch we are in: it is written
+  // every few seconds, where the trainer's own stage document is a separate
+  // publisher that has gone quiet for days at a time. Trust the stage document
+  // only while it is describing the epoch the chain says we are in — otherwise
+  // it is a snapshot of a round that finished long ago, and presenting it as
+  // the round in flight is how a dashboard ends up frozen without saying so.
+  const chainEpoch = chainDoc?.epoch_start_block ?? null;
+  const statusEpoch = status?.epoch_start_block ?? null;
+  const statusIsCurrent = statusEpoch != null && chainEpoch != null && statusEpoch === chainEpoch;
+
+  const epoch = chainEpoch ?? statusEpoch;
   const heatIsCurrent = Boolean(heatDoc && epoch != null && heatDoc.epoch_start_block === epoch);
 
-  // Which validators have already certified this round, and which are still working.
+  // Which validators have already certified this round, and which are still
+  // working. Matched on the epoch rather than the trainer's round id, which is
+  // only known while its document is current.
   const known = new Map();
   for (const r of index?.rounds?.slice(0, 12) ?? []) {
     for (const rc of r.receipts) known.set(rc.validator_hotkey, true);
   }
-  const thisRound = index?.rounds?.find((r) => String(r.round_id) === roundId) ?? null;
+  const thisRound = index?.rounds?.find((r) => r.epoch_start_block === epoch) ?? null;
+  const roundId = statusIsCurrent && status?.round_id != null
+    ? String(status.round_id)
+    : thisRound?.round_id != null
+    ? String(thisRound.round_id)
+    : null;
   const published = new Map((thisRound?.receipts ?? []).map((rc) => [rc.validator_hotkey, rc]));
 
   const validators = [...known.keys()].map((hotkey) => {
@@ -598,7 +642,14 @@ async function liveStatus() {
     };
   });
 
-  const stageIndex = STAGES.findIndex((s) => s.key === status?.stage);
+  // Once a receipt exists for this epoch the round is on record, whatever any
+  // stage document says.
+  const stage = statusIsCurrent
+    ? status?.stage ?? null
+    : thisRound
+    ? 'published'
+    : deriveStage(chainDoc);
+  const stageIndex = STAGES.findIndex((x) => x.key === stage);
 
   // One list per submitted generator, screened and rejected together, so the
   // verification state of every submission reads in a single pass.
@@ -648,6 +699,9 @@ async function liveStatus() {
     hotkey: s.hotkey,
     gen_ref: s.gen_ref,
     commit_block: s.commit_block,
+    // The commit list is cumulative, so it carries generators revealed many
+    // rounds ago alongside this round's. Only the latter are competing now.
+    this_round: epoch != null && s.commit_block >= epoch,
   }));
 
   return {
@@ -668,6 +722,7 @@ async function liveStatus() {
     activation: activationVote(chainDoc),
     committed_now: committedNow,
     committed_now_count: committedNow.length,
+    committed_this_round: committedNow.filter((c) => c.this_round).length,
     submissions,
     submission_counts: {
       // The published doc truncates the rejected list, so the total and the
@@ -682,18 +737,55 @@ async function liveStatus() {
       rejected_truncated: Boolean(skipped?.entries_truncated),
       by_reason: skipped?.by_reason ?? {},
     },
-    as_of: status?.as_of ?? null,
+    /**
+     * Per-source freshness. These four documents have independent publishers
+     * and independent failure modes, and the difference between "the chain is
+     * quiet" and "the trainer stopped writing" is not something a viewer can
+     * infer from a page that renders both the same way.
+     */
+    feeds: {
+      chain: { as_of: chainDoc?.as_of ?? null, age_s: ageSeconds(chainDoc?.as_of), live: Boolean(chainDoc) },
+      round: {
+        as_of: status?.as_of ?? null,
+        age_s: ageSeconds(status?.as_of),
+        epoch_start_block: statusEpoch,
+        live: statusIsCurrent,
+      },
+      heat: {
+        as_of: heatDoc?.as_of ?? null,
+        age_s: ageSeconds(heatDoc?.as_of),
+        epoch_start_block: heatDoc?.epoch_start_block ?? null,
+        live: heatIsCurrent,
+      },
+      receipts: { as_of: index?.updated_at ?? null, age_s: ageSeconds(index?.updated_at), live: Boolean(index) },
+    },
+    /** 'trainer' when the stage document is current, 'chain' when derived from it. */
+    stage_source: statusIsCurrent ? 'trainer' : 'chain',
+    as_of: statusIsCurrent ? status?.as_of ?? null : chainDoc?.as_of ?? null,
     round_id: roundId,
     epoch_start_block: epoch,
     epoch_blocks: index?.chain?.epoch_blocks ?? 3600,
     block_time_s: index?.chain?.block_time_s ?? 12,
-    stage: status?.stage ?? null,
+    /**
+     * The newest commits, carried in the round section rather than the 44KB
+     * commit list. When the heat feed is quiet these are the only per-miner
+     * facts about the round in flight, and every page needs a few of them.
+     */
+    recent_commits: [...committedNow]
+      .sort((a, b) => (b.commit_block ?? 0) - (a.commit_block ?? 0))
+      .slice(0, 30),
+    stage,
     stage_index: stageIndex,
     stages: STAGES,
-    heat_done: status?.heat_done ?? null,
-    heat_total: status?.heat_total ?? null,
-    finalists: status?.finalists ?? null,
-    warm_start: warmStart(status?.warm_start),
+    // Only meaningful while the stage document describes this epoch.
+    heat_done: statusIsCurrent ? status?.heat_done ?? null : null,
+    heat_total: statusIsCurrent ? status?.heat_total ?? null : null,
+    finalists: statusIsCurrent ? status?.finalists ?? null : null,
+    // Both sources for this are stage documents; neither is worth reporting
+    // once it has stopped describing the epoch in flight.
+    warm_start: warmStart(
+      statusIsCurrent ? status?.warm_start : heatIsCurrent ? heatDoc?.warm_start : null
+    ),
     heat: heatDoc
       ? {
           is_current: heatIsCurrent,

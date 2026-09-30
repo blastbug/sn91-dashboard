@@ -1570,6 +1570,14 @@ tr.is-king:hover {
   border: 1px solid transparent;
   margin-bottom: 14px;
 }
+.notice.warn {
+  border-color: rgba(240, 206, 94, 0.32);
+  background: var(--warning-soft);
+  color: var(--ink);
+}
+.notice.warn > span:first-child {
+  color: var(--warning);
+}
 .notice.info {
   background: var(--accent-soft);
 }

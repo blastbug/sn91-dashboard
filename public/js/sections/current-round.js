@@ -175,6 +175,57 @@ function renderSubmissions(live) {
     return;
   }
 
+  // The heat document is a trainer-published mirror with its own publisher, and
+  // it has stopped for days at a time while rounds kept running. When it is not
+  // describing the epoch in flight, the chain's commit list is what is actually
+  // true about this round — showing last week's standings under this round's
+  // heading is how the page ends up looking frozen.
+  if (!heat.is_current) {
+    const commits = live.recent_commits ?? [];
+    paint(el, `
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Submitted generators — on chain</h2>
+          <span class="badge accent">● live</span>
+        </div>
+        <p class="panel-note">
+          The trainer's heat document has not published for ${esc(
+            timeAgo(heat.as_of).replace(' ago', '')
+          )} — it last described epoch ${fmtNum(heat.epoch_start_block)}, so CRPS, MASE and p(best) are
+          unavailable for this round. These are the newest generators revealed on chain instead.
+        </p>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead><tr><th>UID</th><th>Hotkey</th><th>Generator</th><th>Committed</th><th>Round</th></tr></thead>
+            <tbody>
+              ${
+                commits.length
+                  ? commits
+                      .map(
+                        (c) => `<tr class="stripe ${c.this_round ? 'role-advanced' : ''}">
+                          <td><strong>${esc(c.uid)}</strong></td>
+                          <td class="mono" title="${esc(c.hotkey ?? '')}">${esc(shortAddr(c.hotkey))}</td>
+                          <td class="mono tiny dim" title="${esc(c.gen_ref ?? '')}">${esc(
+                          shortGenRef(c.gen_ref)
+                        )}</td>
+                          <td class="num">${fmtNum(c.commit_block)}</td>
+                          <td>${
+                            c.this_round
+                              ? '<span class="badge good">this round</span>'
+                              : '<span class="dim tiny">standing</span>'
+                          }</td>
+                        </tr>`
+                      )
+                      .join('')
+                  : '<tr><td colspan="5" class="empty">No generators revealed on chain.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>`);
+    return;
+  }
+
   // The heat pointer keeps serving the previous round until this round's heat
   // settles, so standings are only "this round" when the epoch matches.
   const current = heat.is_current;

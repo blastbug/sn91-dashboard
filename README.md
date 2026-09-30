@@ -107,6 +107,23 @@ signed round receipts with public-read ACLs so third parties can audit rounds wi
 `validation`, with `heat_done`/`heat_total` inside the heat), and `status/heat.json` mirrors the
 heat standings the moment they settle. Both are unsigned, single-writer and best-effort.
 
+**These two stop.** They are a different publisher from `status/chain.json`, and they have gone
+silent for days while the tournament carried on — on 2026-09-30 they were last written on
+2026-09-24, describing epoch 9133200, by which point the chain had run 54 more rounds. A dashboard
+that keys "the round in flight" off them simply freezes, with every panel showing a week-old round
+and no indication anything is wrong. So the **chain mirror is the authority on which epoch we are
+in**, and the stage document is trusted only while its `epoch_start_block` matches the chain's.
+When it does not:
+
+- the **stage is derived** from the epoch's position against the published `stage_windows`, or read
+  as `published` once a receipt exists for that epoch;
+- **per-miner heat figures** (rank, CRPS, MASE, p(best)) are reported as unavailable rather than
+  carried over from the last round the document described;
+- the **commit list on `status/chain.json`** — which never stops — drives the submission panels
+  instead, so they show what is on chain this round rather than what was screened last week;
+- `liveStatus()` returns a `feeds` block giving each document's `as_of`, age and whether it is
+  current, and the Overview says in plain terms which feed stopped and what is still trustworthy.
+
 The heat pointer keeps serving the **previous** round's standings until the current heat settles,
 so it is only presented as this round's when its `epoch_start_block` matches the round in flight —
 otherwise the dashboard labels it as history. Joining on nothing would show last round's ranking as

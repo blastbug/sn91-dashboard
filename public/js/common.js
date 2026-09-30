@@ -306,7 +306,7 @@ export function renderRail(live) {
 
   const p = epochProgress(projectedBlock(live.chain), live.epoch_blocks);
   const stageLabel = live.stages?.[live.stage_index]?.label ?? 'Idle';
-  const finalists = live.finalists ?? live.heat?.finalists ?? null;
+  const finalists = live.finalists ?? (live.heat?.is_current ? live.heat.finalists : null) ?? null;
   const gen = live.warm_start?.generation;
 
   paint(el, `

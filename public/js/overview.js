@@ -100,7 +100,7 @@ function renderKpis({ live, latest, rewards, metagraph, rounds: roundsHist }) {
   //    duel-only round every revealed entrant is seated, so this is the field
   //    size, and `cohort` says how many of the last field cleared the margin.
   const cohort = latest?.cohort ?? null;
-  const finalists = live?.finalists ?? live?.heat?.finalists ?? null;
+  const finalists = live?.finalists ?? (live?.heat?.is_current ? live.heat.finalists : null) ?? null;
   const finalistSeries = series(rounds, 20, (r) => r.heat?.finalists ?? r.cohort_k);
 
   // 6. Reign length — how many rounds the current king has held, vs. past reigns.
@@ -177,6 +177,51 @@ function renderKpis({ live, latest, rewards, metagraph, rounds: roundsHist }) {
  * A finalist only takes the crown if its LCB clears the win margin outright;
  * simply scoring better than the king is not enough.
  */
+/**
+ * The four upstream documents have independent publishers, and the trainer's
+ * stage and heat feeds have stopped before while the chain carried on. A page
+ * that renders a six-day-old round exactly like a live one is worse than one
+ * that says nothing — so when a feed goes quiet, say which one, how long ago,
+ * and what is still trustworthy.
+ */
+function renderFeedNotice(live) {
+  const f = live?.feeds;
+  if (!f) {
+    paint('feedNotice', '');
+    return;
+  }
+
+  const stopped = [
+    !f.round?.live && { key: 'round', label: 'round stage', feed: f.round },
+    !f.heat?.live && { key: 'heat', label: 'heat standings', feed: f.heat },
+  ].filter(Boolean);
+
+  if (!stopped.length) {
+    paint('feedNotice', '');
+    return;
+  }
+
+  const oldest = stopped.reduce((a, b) => ((a.feed.age_s ?? 0) > (b.feed.age_s ?? 0) ? a : b));
+  const behind =
+    oldest.feed.epoch_start_block != null && live.epoch_start_block != null && live.epoch_blocks
+      ? Math.round((live.epoch_start_block - oldest.feed.epoch_start_block) / live.epoch_blocks)
+      : null;
+
+  paint('feedNotice', `
+    <div class="notice warn">
+      <span>◷</span>
+      <div>
+        <strong>The trainer's ${stopped.map((s) => s.label).join(' and ')} feed
+        ${stopped.length > 1 ? 'have' : 'has'} not published for ${esc(timeAgo(oldest.feed.as_of).replace(' ago', ''))}.</strong>
+        It last described epoch ${fmtNum(oldest.feed.epoch_start_block)}${
+    behind ? `, ${fmtNum(behind)} rounds ago` : ''
+  } — the chain is on ${fmtNum(live.epoch_start_block)}.
+        Block height, on-chain commits and published receipts are unaffected and still live; the round
+        stage is derived from the chain instead, and per-miner heat scores stay blank until the feed resumes.
+      </div>
+    </div>`);
+}
+
 function renderCohort(latest, live) {
   const c = latest?.cohort;
   const round = latest?.round;
@@ -460,24 +505,78 @@ function renderPerformance(roundsHist) {
   draw();
 }
 
+/**
+ * What miners have actually put on chain for this round.
+ *
+ * The heat mirror is the richer source — it carries CRPS, MASE and p(best) —
+ * but it is a trainer-published document that has gone quiet for days at a
+ * time. The chain's own commit list never does, so when the heat feed is not
+ * describing the round in flight this falls back to it: fewer columns, but
+ * about the round actually happening rather than about one from last week.
+ */
 function renderVerification(live) {
+  const heat = live?.heat;
+  const current = heat?.is_current;
+
+  if (!current) {
+    const commits = (live?.recent_commits ?? []).slice(0, 6);
+    const block = projectedBlock(live?.chain);
+    const secs = (b) => (block != null && b != null ? (block - b) * (live?.block_time_s ?? 12) : null);
+
+    paint('verifyList', `
+      <div class="panel">
+        <div class="panel-header">
+          <h2>Latest Submissions</h2>
+          <span class="badge accent">● on chain</span>
+        </div>
+        <p class="panel-note">
+          Generators revealed on chain, newest first. The heat feed that carries CRPS and p(best) has not
+          published for ${esc(timeAgo(heat?.as_of).replace(' ago', ''))}, so scores are unavailable — these
+          are the commits themselves. <a href="/#submissions" onclick="document.getElementById('submissions').scrollIntoView({behavior:'smooth'})">All ${fmtNum(
+            live?.committed_now_count
+          )} ↓</a>
+        </p>
+        <div class="verify-list">
+          ${
+            commits.length
+              ? commits
+                  .map(
+                    (c) => `<div class="verify-item">
+                      ${ring(100, { size: 46, stroke: 5, color: c.this_round ? 'var(--good)' : 'var(--line-2)', label: `${esc(c.uid)}` })}
+                      <div class="verify-meta">
+                        <div class="vm-top">UID ${esc(c.uid)} ${
+                      c.this_round
+                        ? '<span class="badge good">this round</span>'
+                        : '<span class="badge plain">standing</span>'
+                    }</div>
+                        <div class="vm-sub">block ${fmtNum(c.commit_block)}${
+                      secs(c.commit_block) != null ? ` · ${fmtDuration(secs(c.commit_block))} ago` : ''
+                    }</div>
+                        <div class="vm-detail" title="${esc(c.gen_ref ?? '')}">${esc(shortAddr(c.hotkey))}</div>
+                      </div>
+                    </div>`
+                  )
+                  .join('')
+              : '<div class="verify-item"><div class="empty">No generators committed on chain.</div></div>'
+          }
+        </div>
+      </div>`);
+    return;
+  }
+
   // This panel is built around the p(best) ring, so it must lead with entrants
   // that actually have a score. Rejected submissions carry no rank or p(best);
   // sorting on rank alone let them fill the panel with empty rings whenever the
   // heat hasn't screened anything yet.
   const scored = (live?.submissions ?? []).filter((s) => s.state !== 'rejected');
   const subs = [...scored].sort((a, b) => (a.rank ?? 1e9) - (b.rank ?? 1e9)).slice(0, 5);
-  const heat = live?.heat;
-  const current = heat?.is_current;
   const rejectedOnly = (live?.submissions ?? []).length > 0 && scored.length === 0;
 
   paint('verifyList', `
     <div class="panel">
       <div class="panel-header">
         <h2>Miners Under Verification</h2>
-        <span class="badge ${current ? 'good' : 'warning'}">${
-    current ? '● this round' : `◷ epoch ${fmtNum(heat?.epoch_start_block)}`
-  }</span>
+        <span class="badge good">● this round</span>
       </div>
       <p class="panel-note">
         ${
@@ -543,6 +642,12 @@ function renderPipeline(live) {
       <div class="panel-header"><h2>Round Pipeline</h2><span class="badge accent">epoch ${fmtNum(
         live?.epoch_start_block
       )}</span></div>
+      ${
+        live?.stage_source === 'chain'
+          ? `<p class="panel-note" style="margin-bottom:10px">Stage derived from the epoch's position on
+             chain — the trainer's own stage feed is not publishing.</p>`
+          : ''
+      }
       ${stepper(live, { vertical: true })}
       ${
         p
@@ -555,11 +660,15 @@ function renderPipeline(live) {
           : ''
       }
       <dl class="kv tight" style="margin-top:14px">
-        <dt>Field</dt><dd>${fmtNum(live?.finalists ?? live?.heat?.finalists)}${
-    live?.heat?.duel_only ? ' · duel-only' : ' finalists'
-  }</dd>
+        <dt>Field</dt><dd>${
+          live?.finalists != null || live?.heat?.is_current
+            ? `${fmtNum(live?.finalists ?? live?.heat?.finalists)}${
+                live?.heat?.duel_only ? ' · duel-only' : ' finalists'
+              }`
+            : '<span class="dim">not published</span>'
+        }</dd>
         <dt>Generation</dt><dd>${
-          ws?.generation != null ? fmtNum(ws.generation) : ws?.active ? 'warm' : 'cold start'
+          ws?.generation != null ? fmtNum(ws.generation) : ws?.active ? 'warm' : '<span class="dim">—</span>'
         }</dd>
         <dt>Heat window</dt><dd>${windows ? fmtDuration(windows.heat_seconds) : '—'}</dd>
         <dt>Duel window</dt><dd>${windows ? fmtDuration(windows.duel_seconds) : '—'}</dd>
@@ -608,9 +717,79 @@ const STATE_ROW_BADGE = STATE_BADGE;
 
 function renderSubmissionsTable(live) {
   const el = document.getElementById('submissions');
+  const heat = live?.heat;
+  const current = heat?.is_current;
+
+  // Without a current heat document there are no per-miner scores to show, but
+  // the chain still says who has revealed a generator. That is the honest
+  // version of this panel: what is on chain, not what was screened last week.
+  if (!current) {
+    const commits = live?.recent_commits ?? [];
+    const block = projectedBlock(live?.chain);
+    const ago = (b) =>
+      block != null && b != null ? fmtDuration((block - b) * (live?.block_time_s ?? 12)) : null;
+
+    paint(el, `
+      <div class="panel">
+        <div class="panel-header">
+          <h2>On-chain Submissions — ${fmtNum(live?.committed_now_count)} generators</h2>
+          <span class="badge accent">● live</span>
+        </div>
+        <p class="panel-note" style="margin-bottom:12px">
+          Every generator currently revealed on chain, newest first. Per-miner CRPS, MASE and p(best) come
+          from the trainer's heat document, which has not published for ${esc(
+            timeAgo(heat?.as_of).replace(' ago', '')
+          )} — those columns stay blank until it resumes. Commits, rounds and receipts are unaffected.
+        </p>
+        <div class="stat-grid" style="margin-bottom:14px">
+          <div class="stat-tile"><div class="stat-label">Revealed on chain</div><div class="stat-value">${fmtNum(
+            live?.committed_now_count
+          )}</div><div class="stat-sub">generators standing</div></div>
+          <div class="stat-tile"><div class="stat-label">This round</div><div class="stat-value ${
+            live?.committed_this_round ? 'good' : ''
+          }">${fmtNum(live?.committed_this_round)}</div><div class="stat-sub">committed since epoch ${fmtNum(
+      live?.epoch_start_block
+    )}</div></div>
+          <div class="stat-tile"><div class="stat-label">Listed below</div><div class="stat-value">${fmtNum(
+            commits.length
+          )}</div><div class="stat-sub">newest commits</div></div>
+          <div class="stat-tile"><div class="stat-label">Full roster</div><div class="stat-value"><a href="/miners">Miners →</a></div><div class="stat-sub">with chain state</div></div>
+        </div>
+        <div class="table-wrap scroll-cap">
+          <table class="data-table">
+            <thead><tr><th>UID</th><th>Hotkey</th><th>Generator</th><th>Committed</th><th>Age</th><th>Round</th></tr></thead>
+            <tbody>
+              ${
+                commits.length
+                  ? commits
+                      .map(
+                        (c) => `<tr class="stripe ${c.this_round ? 'role-advanced' : ''}">
+                          <td><strong>${esc(c.uid)}</strong></td>
+                          <td class="mono" title="${esc(c.hotkey ?? '')}">${esc(shortAddr(c.hotkey))}</td>
+                          <td class="mono tiny dim" title="${esc(c.gen_ref ?? '')}">${esc(
+                          shortGenRef(c.gen_ref)
+                        )}</td>
+                          <td class="num">${fmtNum(c.commit_block)}</td>
+                          <td class="dim tiny">${ago(c.commit_block) ?? '—'}</td>
+                          <td>${
+                            c.this_round
+                              ? '<span class="badge good">this round</span>'
+                              : '<span class="dim tiny">standing</span>'
+                          }</td>
+                        </tr>`
+                      )
+                      .join('')
+                  : '<tr><td colspan="6" class="empty">No generators revealed on chain.</td></tr>'
+              }
+            </tbody>
+          </table>
+        </div>
+      </div>`);
+    return;
+  }
+
   const subs = live?.submissions ?? [];
   const c = live?.submission_counts;
-  const heat = live?.heat;
 
   if (!subs.length || !c) {
     paint(el, `<div class="panel"><div class="panel-header"><h2>Submission Verification</h2></div>
@@ -618,7 +797,6 @@ function renderSubmissionsTable(live) {
     return;
   }
 
-  const current = heat?.is_current;
   const order = { advanced: 0, screened: 1, rejected: 2 };
   const rows = [...subs].sort(
     (a, b) => (order[a.state] - order[b.state]) || (a.rank ?? 1e9) - (b.rank ?? 1e9) || a.uid - b.uid
@@ -628,9 +806,9 @@ function renderSubmissionsTable(live) {
     <div class="panel">
       <div class="panel-header">
         <h2>Submission Verification — ${fmtNum(c.submitted)} miners</h2>
-        <span class="badge ${current ? 'good' : 'warning'}">${
-    current ? '● this round' : `◷ epoch ${fmtNum(heat?.epoch_start_block)}`
-  }</span>
+        <span class="badge ${current ? 'good' : 'warning'}" title="${
+    current ? '' : `heat feed last published ${esc(timeAgo(heat?.as_of))}`
+  }">${current ? '● this round' : `◷ ${esc(timeAgo(heat?.as_of))}`}</span>
       </div>
       <p class="panel-note" style="margin-bottom:12px">
         ${
@@ -689,6 +867,20 @@ function renderSubmissionsTable(live) {
           : ''
       }
     </div>`);
+}
+
+/** What the metered tier last found missing, so the live tier does not clear it. */
+let missingSources = [];
+
+/** Feeds that are answering but no longer describing the round in flight. */
+function feedStaleness(live) {
+  const f = live?.feeds;
+  if (!f) return [];
+  return [
+    !f.round?.live && `round stage (${timeAgo(f.round?.as_of)})`,
+    !f.heat?.live && `heat standings (${timeAgo(f.heat?.as_of)})`,
+    !f.chain?.live && 'chain mirror',
+  ].filter(Boolean);
 }
 
 /** Resolves to {ok, value} instead of rejecting, so one dead call can't sink the page. */
@@ -819,6 +1011,7 @@ const state = {
 function renderLiveTier() {
   const { live, latest } = state;
   if (!live) return;
+  renderFeedNotice(live);
   renderGovernance(live);
   renderCohort(latest, live);
   renderVerification(live);
@@ -853,9 +1046,8 @@ async function loadMeteredTier() {
   renderBenchmarks(state.bench);
   renderKpis(state);
 
-  const missing = [!sr.ok && 'subnet', !mr.ok && 'metagraph'].filter(Boolean);
-  const stale = [state.live?.stale && 'live status', state.latest?.stale && 'rounds'].filter(Boolean);
-  setStatus({ stale, missing });
+  missingSources = [!sr.ok && 'subnet', !mr.ok && 'metagraph'].filter(Boolean);
+  setStatus({ stale: feedStaleness(state.live), missing: missingSources });
 }
 
 mountLive({
@@ -867,6 +1059,7 @@ mountLive({
     // Chain Health and the rankings read the live round too, so they follow.
     renderChainHealth(state.subnet, live);
     renderRankings(state.metagraph ?? [], latest);
+    setStatus({ stale: feedStaleness(live), missing: missingSources });
     markUpdated();
   },
   onMode: (mode, detail) => {

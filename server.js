@@ -75,10 +75,12 @@ const liveBus = createLiveBus({
     const live = liveRes.status === 'fulfilled' ? liveRes.value : null;
     if (!live) return { board: latest };
 
-    const { chain, activation, committed_now, committed_now_count, ...round } = live;
+    // Only the 44KB array itself goes in `commits`; the two counts derived from
+    // it are eight bytes and every page needs them, so they ride with `round`.
+    const { chain, activation, committed_now, ...round } = live;
     return {
       chain: { chain, activation },
-      commits: { committed_now, committed_now_count },
+      commits: { committed_now },
       round,
       board: latest,
     };
