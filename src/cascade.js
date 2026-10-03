@@ -400,7 +400,11 @@ async function roundIndex() {
   return {
     subnet: raw.subnet ?? null,
     updated_at: raw.updated_at ?? null,
-    chain: { ...chain, epoch_blocks: chain.epoch_blocks ?? 3600 },
+    chain: {
+      ...chain,
+      epoch_blocks: chain.epoch_blocks ?? 3600,
+      block_time_s_measured: measuredBlockTime(rounds),
+    },
     totals: {
       rounds: rounds.length,
       receipts: (raw.rounds ?? []).length,
@@ -558,6 +562,35 @@ export const STAGES = [
  * presented as live when its epoch_start_block matches the round in flight —
  * otherwise a dashboard shows last round's ranking as this round's.
  */
+/**
+ * Seconds per block, measured rather than taken on trust.
+ *
+ * status/chain.json publishes `block_time_s`, and it has been wrong by a factor
+ * of four — 48 against a measured 12 — which makes every "time remaining" on
+ * the page four times too long and the projected block height crawl. Every pair
+ * of consecutive receipts carries both a block delta and a wall-clock delta, so
+ * the real rate is derivable from data already in hand. Median over several
+ * pairs, because a single pair can straddle a stalled publisher.
+ */
+function measuredBlockTime(rounds) {
+  const samples = [];
+  for (let i = 0; i + 1 < rounds.length && samples.length < 12; i += 1) {
+    const db = rounds[i].epoch_start_block - rounds[i + 1].epoch_start_block;
+    const dt = (Date.parse(rounds[i].published_at) - Date.parse(rounds[i + 1].published_at)) / 1000;
+    if (db > 0 && dt > 0) samples.push(dt / db);
+  }
+  if (!samples.length) return null;
+  samples.sort((a, b) => a - b);
+  return samples[samples.length >> 1];
+}
+
+/** Trust the published figure only while it agrees with what the receipts show. */
+function reconcileBlockTime(published, measured) {
+  if (!Number.isFinite(measured) || measured <= 0) return published || 12;
+  if (!Number.isFinite(published) || published <= 0) return measured;
+  return Math.abs(published - measured) / measured > 0.25 ? measured : published;
+}
+
 /** Age of a published timestamp in seconds, or null if it cannot be read. */
 function ageSeconds(ts) {
   if (!ts) return null;
@@ -614,6 +647,10 @@ async function liveStatus() {
   const statusIsCurrent = statusEpoch != null && chainEpoch != null && statusEpoch === chainEpoch;
 
   const epoch = chainEpoch ?? statusEpoch;
+  // One block time for the whole payload: the projected height, the epoch
+  // progress and every "time left" must agree, and the published value cannot
+  // be relied on to be the one they should agree on.
+  const blockTimeS = reconcileBlockTime(chainDoc?.block_time_s, index?.chain?.block_time_s_measured);
   const heatIsCurrent = Boolean(heatDoc && epoch != null && heatDoc.epoch_start_block === epoch);
 
   // Which validators have already certified this round, and which are still
@@ -708,7 +745,8 @@ async function liveStatus() {
     chain: chainDoc
       ? {
           current_block: chainDoc.current_block ?? null,
-          block_time_s: chainDoc.block_time_s ?? 12,
+          block_time_s: blockTimeS,
+          block_time_s_published: chainDoc.block_time_s ?? null,
           epoch_blocks: chainDoc.epoch_blocks ?? 3600,
           epoch_start_block: chainDoc.epoch_start_block ?? null,
           network: chainDoc.network ?? null,
@@ -765,7 +803,7 @@ async function liveStatus() {
     round_id: roundId,
     epoch_start_block: epoch,
     epoch_blocks: index?.chain?.epoch_blocks ?? 3600,
-    block_time_s: index?.chain?.block_time_s ?? 12,
+    block_time_s: blockTimeS,
     /**
      * The newest commits, carried in the round section rather than the 44KB
      * commit list. When the heat feed is quiet these are the only per-miner

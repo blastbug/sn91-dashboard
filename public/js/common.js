@@ -371,16 +371,32 @@ export function sparkline(values, { width = 100, height = 32, color = 'var(--acc
 }
 
 /** A donut/ring gauge with the percentage (or custom label) centered. */
-export function ring(pct, { size = 56, stroke = 6, color = 'var(--accent)', track = 'var(--surface-sunk)', label, sub } = {}) {
+export function ring(
+  pct,
+  { size = 56, stroke = 6, color = 'var(--accent)', track = 'var(--surface-sunk)', label, sub, gradient = false } = {}
+) {
   const r = (size - stroke) / 2;
   const c = 2 * Math.PI * r;
   const clamped = Math.max(0, Math.min(100, pct ?? 0));
   const offset = c * (1 - clamped / 100);
   const center = size / 2;
+  // A gradient stroke needs its own id per instance, or every ring on the page
+  // inherits whichever one was defined last.
+  const gid = `rg${Math.random().toString(36).slice(2, 8)}`;
+  const strokeRef = gradient ? `url(#${gid})` : color;
   return `<div class="ring-wrap" style="width:${size}px;height:${size}px">
     <svg width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">
+      ${
+        gradient
+          ? `<defs><linearGradient id="${gid}" x1="0" y1="0" x2="1" y2="1">
+               <stop offset="0%" stop-color="var(--accent-2)"/>
+               <stop offset="55%" stop-color="var(--accent)"/>
+               <stop offset="100%" stop-color="var(--accent-3)"/>
+             </linearGradient></defs>`
+          : ''
+      }
       <circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="${track}" stroke-width="${stroke}"/>
-      <circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="${color}" stroke-width="${stroke}"
+      <circle cx="${center}" cy="${center}" r="${r}" fill="none" stroke="${strokeRef}" stroke-width="${stroke}"
         stroke-linecap="round" stroke-dasharray="${c}" stroke-dashoffset="${offset}"
         transform="rotate(-90 ${center} ${center})"/>
     </svg>
@@ -693,13 +709,48 @@ window.addEventListener('resize', () => {
   edgeResize = setTimeout(() => markScrollEdges(), 150);
 });
 
+/**
+ * The headline figures in a section, keyed by their own label.
+ *
+ * Panels repaint wholesale, so the old numbers are gone the moment innerHTML
+ * is replaced. Reading them first — by label rather than by position, since
+ * cards reorder — is what lets the repaint say which figures actually moved
+ * instead of flashing the whole card every time anything in it changed.
+ */
+function readFigures(el) {
+  const figures = new Map();
+  for (const card of el.querySelectorAll('.kpi-card, .stat-tile')) {
+    const label = card.querySelector('.kpi-label, .stat-label')?.textContent?.trim();
+    const value = card.querySelector('.kpi-value, .stat-value');
+    if (label && value) figures.set(label, value.textContent.trim());
+  }
+  return figures;
+}
+
+function flagChangedFigures(el, before) {
+  if (!before.size) return;
+  for (const [label, value] of readFigures(el)) {
+    const was = before.get(label);
+    if (was === undefined || was === value) continue;
+    const node = [...el.querySelectorAll('.kpi-card, .stat-tile')]
+      .find((c) => c.querySelector('.kpi-label, .stat-label')?.textContent?.trim() === label)
+      ?.querySelector('.kpi-value, .stat-value');
+    if (!node) continue;
+    node.classList.remove('value-changed');
+    void node.offsetWidth;
+    node.classList.add('value-changed');
+  }
+}
+
 export function paint(target, html) {
   const el = typeof target === 'string' ? document.getElementById(target) : target;
   if (!el) return false;
   if (el.__html === html) return false;
   const first = el.__html === undefined;
+  const before = first ? new Map() : readFigures(el);
   el.__html = html;
   el.innerHTML = html;
+  flagChangedFigures(el, before);
   markScrollEdges();
   if (!first) {
     el.classList.remove('just-updated');

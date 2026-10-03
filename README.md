@@ -15,6 +15,28 @@ telemetry (GPU/CPU, wallet balance, peer latency) were intentionally left out ra
 since this is a passive dashboard over public chain and receipt data, not an agent running inside
 a miner process.
 
+### Visual system and motion
+
+Two accents: violet for the tournament, cyan for anything live or on chain, meeting in one brand
+gradient used on panel hairlines, progress meters, ring gauges and the brand mark — so "moving"
+and "settled" read apart without a legend. Behind the content sit two slow-drifting colour fields
+and a faint ledger grid, masked out before they reach the data.
+
+Motion is either ambient and slow, or tied to a specific event — a console is read for hours and
+nothing here should pull the eye off the numbers:
+
+- panels rise in on first paint, staggered by section, and lift slightly on hover;
+- the block height counts forward between publishes and ticks when it lands;
+- `paint()` reads each section's headline figures *before* replacing its markup and flags only the
+  ones whose value actually changed, so a repaint highlights what moved rather than flashing the
+  whole card;
+- progress meters carry a slow sheen and the live indicator breathes, so a filling bar reads as
+  moving between the updates that change its width;
+- the performance chart draws its line in when the data behind it changes.
+
+All of it is dropped under `prefers-reduced-motion: reduce` — verified by emulating the media
+feature and asserting every `animation-name` resolves to `none`.
+
 ## Setup
 
 1. Copy `.env.example` to `.env` and paste in a [taostats.io/pro](https://taostats.io/pro) API key.

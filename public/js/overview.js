@@ -522,6 +522,20 @@ function renderVerification(live) {
     const commits = (live?.recent_commits ?? []).slice(0, 6);
     const block = projectedBlock(live?.chain);
     const secs = (b) => (block != null && b != null ? (block - b) * (live?.block_time_s ?? 12) : null);
+    // Ring fill reads as recency across the listed commits: a full ring is the
+    // newest reveal, an empty one the oldest still standing.
+    const ages = commits.map((c) => secs(c.commit_block)).filter((x) => x != null);
+    const oldest = ages.length ? Math.max(...ages, 1) : 1;
+    const freshness = (b) => {
+      const a = secs(b);
+      return a == null ? 100 : Math.max(6, (1 - a / oldest) * 100);
+    };
+    const shortAge = (a) => {
+      if (a == null) return '—';
+      if (a < 5400) return `${Math.round(a / 60)}m`;
+      if (a < 172800) return `${Math.round(a / 3600)}h`;
+      return `${Math.round(a / 86400)}d`;
+    };
 
     paint('verifyList', `
       <div class="panel">
@@ -542,7 +556,12 @@ function renderVerification(live) {
               ? commits
                   .map(
                     (c) => `<div class="verify-item">
-                      ${ring(100, { size: 46, stroke: 5, color: c.this_round ? 'var(--good)' : 'var(--line-2)', label: `${esc(c.uid)}` })}
+                      ${ring(freshness(c.commit_block), {
+                        size: 46,
+                        stroke: 5,
+                        color: c.this_round ? 'var(--good)' : 'var(--accent)',
+                        label: shortAge(secs(c.commit_block)),
+                      })}
                       <div class="verify-meta">
                         <div class="vm-top">UID ${esc(c.uid)} ${
                       c.this_round
@@ -691,7 +710,7 @@ function renderChainHealth(subnet, live) {
       <div class="panel-header"><h2>Chain Health</h2></div>
       <div class="health-rings">
         <div class="health-ring">
-          ${ring(keysPct, { size: 68, stroke: 7, color: 'var(--series-1)' })}
+          ${ring(keysPct, { size: 68, stroke: 7, gradient: true })}
           <div class="dim tiny">Keys used<br>${fmtNum(subnet?.active_keys)}/${fmtNum(subnet?.max_neurons)}</div>
         </div>
         <div class="health-ring">
